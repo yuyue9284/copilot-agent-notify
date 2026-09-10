@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "type": "command",
+        "bash": "bash \"${PLUGIN_ROOT}/scripts/activity.sh\" sessionStart",
+        "powershell": "& (Join-Path $env:PLUGIN_ROOT \"scripts/activity.ps1\") sessionStart",
+        "timeoutSec": 30
+      }
+    ],
+    "userPromptSubmitted": [
+      {
+        "type": "command",
+        "bash": "bash \"${PLUGIN_ROOT}/scripts/activity.sh\" userPromptSubmitted",
+        "powershell": "& (Join-Path $env:PLUGIN_ROOT \"scripts/activity.ps1\") userPromptSubmitted",
+        "timeoutSec": 30
+      }
+    ],
+    "sessionEnd": [
+      {
+        "type": "command",
+        "bash": "bash \"${PLUGIN_ROOT}/scripts/activity.sh\" sessionEnd",
+        "powershell": "& (Join-Path $env:PLUGIN_ROOT \"scripts/activity.ps1\") sessionEnd",
+        "timeoutSec": 30
+      }
+    ],
+    "agentStop": [
+      {
+        "type": "command",
+        "bash": "\"${PLUGIN_ROOT}/scripts/notify.sh\" agentStop",
+        "powershell": "& (Join-Path $env:PLUGIN_ROOT \"scripts/notify.ps1\") agentStop",
+        "timeoutSec": 15
+      },
+      {
+        "type": "command",
+        "bash": "bash \"${PLUGIN_ROOT}/scripts/activity.sh\" agentStop",
+        "powershell": "& (Join-Path $env:PLUGIN_ROOT \"scripts/activity.ps1\") agentStop",
+        "timeoutSec": 30
+      }
+    ],
+    "subagentStop": [
+      {
+        "type": "command",
+        "bash": "\"${PLUGIN_ROOT}/scripts/notify.sh\" subagentStop",
+        "powershell": "& (Join-Path $env:PLUGIN_ROOT \"scripts/notify.ps1\") subagentStop",
+        "timeoutSec": 15
+      }
+    ],
+    "notification": [
+      {
+        "type": "command",
+        "matcher": "permission_prompt|elicitation_dialog",
+        "bash": "\"${PLUGIN_ROOT}/scripts/notify.sh\" notification",
+        "powershell": "& (Join-Path $env:PLUGIN_ROOT \"scripts/notify.ps1\") notification",
+        "timeoutSec": 15
+      }
+    ]
+  }
+}
