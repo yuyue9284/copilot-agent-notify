@@ -4,7 +4,7 @@ A GitHub Copilot CLI plugin that displays a desktop notification when the main
 agent finishes a turn, or when Copilot needs permission or additional user
 input. Subagent completion alerts are disabled by default and can be enabled.
 Inside Zellij, it also decorates the originating pane and its tab with working
-and attention counts. It does not change the outer Windows Terminal tab title.
+and attention icons. It does not change the outer Windows Terminal tab title.
 
 Notifications identify the Copilot instance and session:
 
@@ -32,10 +32,10 @@ sessions with the same title and working directory.
 
 ## Install
 
-From the root of your local checkout:
+Install directly from GitHub:
 
 ```bash
-copilot plugin install .
+copilot plugin install yuyue9284/copilot-agent-notify
 ```
 
 Restart Copilot CLI after installation. Use `copilot plugin list` or
@@ -94,12 +94,13 @@ Requirements:
   Python against WSL Zellij or vice versa.
 
 The prefix uses the hourglass U+23F3 for working and warning U+26A0 for attention,
-each followed by a count. For example, `[\u23f3 2 | \u26a0 1] work` renders with
-the actual Unicode icons. Counts are **Copilot root sessions**, not tool calls:
-a root with a working actor and a different waiting child contributes to both
-counts. If A and B share a tab, finishing A leaves that tab working until B
-finishes. Separate tabs are aggregated independently, including inactive tabs.
-Idle names have no checkmark or other permanent decoration.
+without numeric counts. For example, `[\u23f3 | \u26a0] work` renders with the
+actual Unicode icons. Each icon means at least one Copilot root session in that
+pane or tab has the corresponding state; a root with a working actor and a
+different waiting child can show both icons. If A and B share a tab, finishing A
+leaves that tab working until B finishes. Separate tabs are aggregated
+independently, including inactive tabs. Idle names have no checkmark or other
+permanent decoration.
 
 ### State and lifecycle
 

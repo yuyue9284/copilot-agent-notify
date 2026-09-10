@@ -193,6 +193,15 @@ class TranscriptTests(Files):
             self.reader.poll()
 
 
+class PrefixTests(unittest.TestCase):
+    def test_prefix_uses_icons_without_counts(self):
+        self.assertEqual(activity.prefix((0, 0)), "")
+        self.assertEqual(activity.prefix((1, 0)), "[\u23f3] ")
+        self.assertEqual(activity.prefix((12, 0)), "[\u23f3] ")
+        self.assertEqual(activity.prefix((0, 1)), "[\u26a0] ")
+        self.assertEqual(activity.prefix((1, 1)), "[\u23f3 | \u26a0] ")
+
+
 class FakeZellij:
     def __init__(self):
         self.panes = {

@@ -427,9 +427,9 @@ def prefix(counts):
     busy, attention = counts
     parts = []
     if busy:
-        parts.append("\u23f3 %d" % busy)
+        parts.append("\u23f3")
     if attention:
-        parts.append("\u26a0 %d" % attention)
+        parts.append("\u26a0")
     return "[" + " | ".join(parts) + "] " if parts else ""
 
 
