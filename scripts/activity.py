@@ -230,15 +230,29 @@ class Activity:
         self.root_busy = False
         self.children = set()
         self.child_tools = {}
+        self.child_final = set()
+        self.child_final_turns = {}
+        self.child_stopped = set()
+        self.child_stop_hooks = {}
         self.waiting = {}
         self.tools = {}
         self.stop_hooks = set()
         self.final = False
+        self.final_turn = None
         self.stopped = False
         self.shutdown = False
 
     def resume_actor(self, actor):
         self.waiting.pop(actor, None)
+
+    def complete_child(self, child):
+        self.children.discard(child)
+        self.resume_actor(child)
+        self.child_final.discard(child)
+        self.child_final_turns.pop(child, None)
+        self.child_stopped.discard(child)
+        self.child_stop_hooks = {key: value for key, value in self.child_stop_hooks.items()
+                                 if value != child}
 
     def event(self, event):
         kind = event.get("type")
@@ -254,8 +268,7 @@ class Activity:
             if root:
                 self.reset()
             else:
-                self.children.discard(actor)
-                self.resume_actor(actor)
+                self.complete_child(actor)
         elif kind == "subagent.started":
             child = event.get("agentId") or data.get("agentId") or data.get("toolCallId")
             if child:
@@ -265,14 +278,16 @@ class Activity:
         elif kind in ("subagent.completed", "subagent.failed"):
             child = self.child_tools.pop(data.get("toolCallId"), None) or (
                 event.get("agentId") or data.get("agentId") or data.get("toolCallId"))
-            self.children.discard(child)
-            self.resume_actor(child)
-            self.resume_actor(event.get("agentId") or data.get("agentId"))
+            self.complete_child(child)
+            explicit_child = event.get("agentId") or data.get("agentId")
+            if explicit_child:
+                self.complete_child(explicit_child)
         elif kind == "user.message" and root:
             # Queued/background deliveries are not the start of a new root request.
             if data.get("delivery") == "idle" and data.get("source") in (None, "", "user"):
                 self.root_busy = True
                 self.final = self.stopped = False
+                self.final_turn = None
                 self.stop_hooks.clear()
                 self.resume_actor(actor)
         elif kind == "assistant.turn_start":
@@ -280,9 +295,40 @@ class Activity:
             if root:
                 self.root_busy = True
                 self.final = self.stopped = False
+                self.final_turn = None
                 self.stop_hooks.clear()
+            else:
+                # A completed background agent can receive another message and resume
+                # without another subagent.started event.
+                self.children.add(actor)
+                self.child_final.discard(actor)
+                self.child_final_turns.pop(actor, None)
+                self.child_stopped.discard(actor)
+                self.child_stop_hooks = {key: value for key, value in self.child_stop_hooks.items()
+                                         if value != actor}
         elif kind == "assistant.message" and root:
             self.final = not bool(data.get("toolRequests"))
+            self.final_turn = (data.get("turnId") if self.final
+                               and data.get("phase") == "final_answer" else None)
+        elif kind == "assistant.message":
+            if data.get("toolRequests"):
+                self.child_final.discard(actor)
+                self.child_final_turns.pop(actor, None)
+            else:
+                self.child_final.add(actor)
+                if data.get("phase") == "final_answer" and data.get("turnId") is not None:
+                    self.child_final_turns[actor] = data["turnId"]
+                else:
+                    self.child_final_turns.pop(actor, None)
+        elif kind == "assistant.turn_end" and root:
+            if (self.final_turn is not None and data.get("turnId") == self.final_turn
+                    and not self.stop_hooks and not self.tools.get(self.session_id)):
+                self.stopped = True
+        elif kind == "assistant.turn_end":
+            if (actor in self.child_final_turns
+                    and data.get("turnId") == self.child_final_turns[actor]
+                    and actor not in self.child_stop_hooks.values() and not self.tools.get(actor)):
+                self.child_stopped.add(actor)
         elif kind == "hook.start":
             payload = data.get("input") or {}
             hook = data.get("hookType")
@@ -291,6 +337,8 @@ class Activity:
                 self.stop_hooks.add(data.get("hookInvocationId"))
                 if payload.get("stopReason") in ("abort", "cancelled", "canceled", "user_cancelled"):
                     self.final = True
+            elif hook == "agentStop":
+                self.child_stop_hooks[data.get("hookInvocationId")] = hook_actor
             elif hook == "notification" and payload.get("notification_type") in (
                     "permission_prompt", "elicitation_dialog"):
                 # Notifications may belong to a child even without top-level agentId.
@@ -307,6 +355,11 @@ class Activity:
             if data.get("success") is False:
                 LOG.warning("agentStop hook failed for session %s; stop completion is "
                             "independent of hook success", self.session_id)
+        elif kind == "hook.end" and data.get("hookInvocationId") in self.child_stop_hooks:
+            child = self.child_stop_hooks.pop(data["hookInvocationId"])
+            self.child_stopped.add(child)
+            if data.get("success") is False:
+                LOG.warning("child agentStop hook failed for session %s", child)
         elif kind == "tool.execution_start":
             tool_id = data.get("toolCallId")
             self.tools.setdefault(actor, set()).add(tool_id)
@@ -323,6 +376,8 @@ class Activity:
         if self.root_busy and self.final and self.stopped:
             self.root_busy = False
             self.resume_actor(self.session_id)
+        for child in self.child_final & self.child_stopped:
+            self.complete_child(child)
 
     def counts(self):
         actors = self.children | ({self.session_id} if self.root_busy else set())

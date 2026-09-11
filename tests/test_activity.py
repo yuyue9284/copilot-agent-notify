@@ -76,6 +76,37 @@ class ReducerTests(unittest.TestCase):
         self.assertEqual(self.feed(busy(), event("assistant.message", toolRequests=[{}]),
                                    event("assistant.turn_end")), (1, 0))
 
+    def test_explicit_final_answer_and_matching_turn_end_without_stop_hook(self):
+        self.assertEqual(self.feed(busy(), event("assistant.message", phase="final_answer",
+                                                turnId="5", toolRequests=[])), (1, 0))
+        self.assertEqual(self.feed(event("assistant.turn_end", turnId="5")), (0, 0))
+        self.assertEqual(self.feed(busy()), (1, 0))
+
+    def test_final_fallback_requires_matching_explicit_phase(self):
+        for phase in (None, "commentary", "final_answer"):
+            self.state.reset()
+            self.assertEqual(self.feed(busy(), event("assistant.message", phase=phase,
+                                                    turnId="5", toolRequests=[]),
+                                       event("assistant.turn_end", turnId="other")), (1, 0))
+            if phase != "final_answer":
+                self.assertEqual(self.feed(event("assistant.turn_end", turnId="5")), (1, 0))
+
+    def test_final_fallback_preserves_children_and_pending_hooks(self):
+        self.feed(busy(), event("subagent.started", agent="child"),
+                  event("assistant.message", phase="final_answer", turnId="5", toolRequests=[]))
+        self.assertEqual(self.feed(event("assistant.turn_end", turnId="5")), (1, 0))
+        self.assertEqual(self.feed(event("subagent.completed", agent="child")), (0, 0))
+        self.feed(busy(), event("assistant.message", phase="final_answer", turnId="6"),
+                  finish()[1])
+        self.assertEqual(self.feed(event("assistant.turn_end", turnId="6")), (1, 0))
+        self.assertEqual(self.feed(finish()[2]), (0, 0))
+
+    def test_final_fallback_rejects_child_end_and_running_root_tool(self):
+        self.feed(busy(), event("assistant.message", phase="final_answer", turnId="5"))
+        self.assertEqual(self.feed(event("assistant.turn_end", agent="child", turnId="5")), (1, 0))
+        self.feed(event("tool.execution_start", toolCallId="running"))
+        self.assertEqual(self.feed(event("assistant.turn_end", turnId="5")), (1, 0))
+
     def test_failed_stop_hook_does_not_keep_finished_response_busy(self):
         failed_stop = event("hook.end", hookInvocationId="stop", hookType="agentStop",
                             success=False, error={"message": "Hook command failed with code 126"})
@@ -115,10 +146,58 @@ class ReducerTests(unittest.TestCase):
         self.assertEqual(self.feed(busy(), event("subagent.started", agent="child"),
                                    event("subagent.completed", agent="child")), (1, 0))
 
+    def test_completed_child_resumes_without_subagent_started(self):
+        self.feed(event("subagent.started", agent="child"),
+                  event("subagent.completed", agent="child"))
+        self.assertEqual(self.feed(event("assistant.turn_start", agent="child")), (1, 0))
+        self.assertEqual(self.feed(event("assistant.message", agent="child",
+                                        toolRequests=[{}]),
+                                   event("assistant.turn_end", agent="child", turnId="7")), (1, 0))
+        self.feed(event("assistant.message", agent="child", phase="final_answer",
+                        toolRequests=[], turnId="8"))
+        self.assertEqual(self.feed(event("assistant.turn_end", agent="child", turnId="7")), (1, 0))
+        self.assertEqual(self.feed(event("assistant.turn_end", agent="child", turnId="8")), (0, 0))
+        self.assertEqual(self.feed(event("assistant.turn_start", agent="child")), (1, 0))
+
+    def test_resumed_child_stop_hook_completion_in_either_order(self):
+        for reverse in (False, True):
+            self.state.reset()
+            self.feed(event("assistant.turn_start", agent="child"))
+            message = event("assistant.message", agent="child", toolRequests=[])
+            stop = [
+                event("hook.start", hookType="agentStop", hookInvocationId="child-stop",
+                      input={"sessionId": "child"}),
+                event("hook.end", hookInvocationId="child-stop", success=True),
+            ]
+            self.assertEqual(self.feed(*(stop if reverse else [message])), (1, 0))
+            self.assertEqual(self.feed(*([message] if reverse else stop)), (0, 0))
+            self.assertEqual(self.feed(event("assistant.turn_start", agent="child"),
+                                       event("hook.end", hookInvocationId="child-stop",
+                                             success=True)), (1, 0))
+
     def test_child_completion_correlates_mixed_metadata_by_tool_call(self):
         self.assertEqual(self.feed(event("subagent.started", toolCallId="spawn")), (1, 0))
+        self.assertEqual(self.feed(event("assistant.turn_start", agent="child")), (1, 0))
         self.assertEqual(self.feed(event("subagent.completed", agent="child",
                                          toolCallId="spawn")), (0, 0))
+
+    def test_completed_child_does_not_erase_later_attention(self):
+        self.feed(event("assistant.turn_start", agent="child"),
+                  event("assistant.message", agent="child", phase="final_answer", turnId="1"),
+                  event("assistant.turn_end", agent="child", turnId="1"))
+        self.assertEqual(self.feed(event("hook.start", hookType="notification", input={
+            "sessionId": "child", "notification_type": "permission_prompt",
+        })), (0, 1))
+        self.assertEqual(self.feed(event("tool.execution_complete", toolCallId="unrelated")), (0, 1))
+
+    def test_completed_child_ignores_duplicate_final_turn_end(self):
+        self.feed(event("assistant.turn_start", agent="child"),
+                  event("assistant.message", agent="child", phase="final_answer", turnId="1"),
+                  event("assistant.turn_end", agent="child", turnId="1"),
+                  event("hook.start", hookType="notification", input={
+                      "sessionId": "child", "notification_type": "permission_prompt",
+                  }))
+        self.assertEqual(self.feed(event("assistant.turn_end", agent="child", turnId="1")), (0, 1))
 
     def test_waiting_child_and_working_root(self):
         self.assertEqual(self.feed(busy(), event("subagent.started", agent="child"),
@@ -451,6 +530,21 @@ class RuntimeTests(Files):
         self.wait_for(lambda s: s["tabs"][0]["name"] == activity.prefix((1, 0)) + "work")
         self.write_events(path, [event("session.shutdown")], "a")
         self.wait_for(lambda s: s["tabs"][0]["name"] == "work")
+
+    def test_resumed_child_restores_pane_and_tab_until_its_next_final(self):
+        path = self.transcript("a", [busy(), event("subagent.started", agent="child"),
+                                     *finish("a"), event("subagent.completed", agent="child")])
+        self.assert_process(self.launch())
+        self.write_events(path, [event("assistant.turn_start", agent="child")], "a")
+        self.wait_for(lambda s: s["tabs"][0]["name"] == activity.prefix((1, 0)) + "work"
+                      and s["panes"][0]["title"] == activity.prefix((1, 0)) + "pane1")
+        self.write_events(path, [
+            event("assistant.message", agent="child", phase="final_answer", turnId="7",
+                  toolRequests=[]),
+            event("assistant.turn_end", agent="child", turnId="7"),
+        ], "a")
+        self.wait_for(lambda s: s["tabs"][0]["name"] == "work"
+                      and s["panes"][0]["title"] == "pane1")
 
     def test_historical_shutdown_does_not_drop_resuming_registration(self):
         path = self.transcript("a", [busy(), *finish("a"), event("session.shutdown")])

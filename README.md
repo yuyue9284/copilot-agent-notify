@@ -213,7 +213,7 @@ unavailable and exits rather than retrying forever.
 - Root `assistant.turn_start` and an idle-delivered root user message start
   working. Queued/system/child messages do not independently start a root turn.
   Turn numbers are not assumed monotonic.
-- `assistant.turn_end` does **not** mean the request finished. Idle requires
+- `assistant.turn_end` alone does **not** mean the request finished. Idle normally requires
   both a root assistant message without tool requests and a completed matching
   root `agentStop` hook, in either order. Hook failure is logged, but does not
   keep a finished response working merely because notification delivery failed.
@@ -221,9 +221,18 @@ unavailable and exits rather than retrying forever.
   again, including stop-hook continuations. This is transcript-observed state,
   not a contractual CLI "request complete" API: a stop hook that subsequently
   blocks can cause a brief idle interval before continuation appears.
+- When stop hooks are absent, an explicit `phase: final_answer` message without
+  tool requests followed by the root's matching `assistant.turn_end` also ends
+  root work. This fallback requires a turn ID, no running root tools, and no
+  pending stop hook. Background children still keep the session working.
+  Unmarked messages, commentary, and ordinary tool-turn endings do not qualify.
 - Root background children keep the session working until their
   `subagent.completed`/`subagent.failed` event. Their completion cannot clear an
   active parent. Mixed child metadata is correlated by the spawning tool ID.
+  A child's new `assistant.turn_start` also restores its working state after
+  completion, since resumed agents may not emit another `subagent.started`.
+  Its next final response plus stop-hook completion, or explicit final-answer
+  phase plus matching turn end, clears only that child.
 - `ask_user` waits clear on the matching tool completion. Permission/input
   notification hooks also show attention for children, independently of
   `COPILOT_NOTIFY_SUBAGENTS`. Without an explicit tool correlation ID, attention
