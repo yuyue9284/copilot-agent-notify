@@ -16,6 +16,8 @@ import sys
 import time
 import uuid
 
+from outer_progress import OuterProgress
+
 
 LOG = logging.getLogger("copilot-notify-icons")
 POLL_SECONDS = 1
@@ -301,8 +303,10 @@ class Activity:
                     self.waiting[hook_actor] = None
         elif kind == "hook.end" and data.get("hookInvocationId") in self.stop_hooks:
             self.stop_hooks.discard(data.get("hookInvocationId"))
-            if data.get("success"):
-                self.stopped = True
+            self.stopped = True
+            if data.get("success") is False:
+                LOG.warning("agentStop hook failed for session %s; stop completion is "
+                            "independent of hook success", self.session_id)
         elif kind == "tool.execution_start":
             tool_id = data.get("toolCallId")
             self.tools.setdefault(actor, set()).add(tool_id)
@@ -541,6 +545,8 @@ def run_worker(directory, session, binary):
     try:
         zellij = Zellij(binary, session)
         titles = Titles(zellij, directory / "titles.json")
+        outer = OuterProgress(directory / "outer-progress.json", session,
+                              process_table, process_token, read_json, atomic_json, LOG)
         while True:
             try:
                 with Lock(directory / "registry.lock"):
@@ -557,13 +563,14 @@ def run_worker(directory, session, binary):
                         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
                             cleanup_error = str(error)
                             LOG.error("final restoration unavailable: %s", cleanup_error)
+                        outer_error = outer.update((0, 0), closing=True)
                         atomic_json(directory / "status.json", {
                             "pid": os.getpid(), "heartbeat": time.time(), "running": False,
-                            "registrations": 0, "error": cleanup_error})
+                            "registrations": 0, "error": cleanup_error, "outer_error": outer_error})
                         # Release before letting another registration through.
                         writer.release()
                         LOG.info("coordinator stopped: no live registrations")
-                        return 1 if cleanup_error else 0
+                        return 1 if cleanup_error or outer_error else 0
                 panes, tabs = zellij.snapshot()
                 ready = {}
                 obsolete = {}
@@ -602,13 +609,17 @@ def run_worker(directory, session, binary):
                                 del latest[key]
                         atomic_json(directory / "registrations.json", latest)
                 titles.update(panes, tabs, aggregate(ready, readers, panes))
+                outer_counts = tuple(sum(readers[key].display_counts[index] for key in ready)
+                                     for index in (0, 1))
+                outer_error = outer.update(outer_counts)
                 for key in set(readers) - set(records):
                     del readers[key]
                     del identities[key]
                 atomic_json(directory / "status.json", {
                     "pid": os.getpid(), "token": process_token(os.getpid()),
                     "heartbeat": time.time(), "running": True,
-                    "registrations": len(records) - len(obsolete), "error": None})
+                    "registrations": len(records) - len(obsolete), "error": None,
+                    "outer_error": outer_error})
                 last_error = None
             except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
                 message = str(error)

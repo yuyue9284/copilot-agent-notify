@@ -13,6 +13,7 @@ import uuid
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
 SPEC = importlib.util.spec_from_file_location("activity", ROOT / "scripts/activity.py")
 activity = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(activity)
@@ -74,6 +75,28 @@ class ReducerTests(unittest.TestCase):
     def test_tool_cycle_end_does_not_clear(self):
         self.assertEqual(self.feed(busy(), event("assistant.message", toolRequests=[{}]),
                                    event("assistant.turn_end")), (1, 0))
+
+    def test_failed_stop_hook_does_not_keep_finished_response_busy(self):
+        failed_stop = event("hook.end", hookInvocationId="stop", hookType="agentStop",
+                            success=False, error={"message": "Hook command failed with code 126"})
+        with self.assertLogs("copilot-notify-icons", level="WARNING"):
+            self.assertEqual(self.feed(busy(), *finish()[:2], failed_stop), (0, 0))
+        self.assertEqual(self.feed(busy()), (1, 0))
+
+    def test_failed_stop_before_final_does_not_clear_work_early(self):
+        with self.assertLogs("copilot-notify-icons", level="WARNING"):
+            self.assertEqual(self.feed(busy(), finish()[1],
+                                       event("hook.end", hookInvocationId="stop", success=False)),
+                             (1, 0))
+        self.assertEqual(self.feed(finish()[0]), (0, 0))
+
+    def test_failed_stop_keeps_running_child_active(self):
+        with self.assertLogs("copilot-notify-icons", level="WARNING"):
+            self.assertEqual(self.feed(busy(), event("subagent.started", agent="child"),
+                                       *finish()[:2],
+                                       event("hook.end", hookInvocationId="stop", success=False)),
+                             (1, 0))
+        self.assertEqual(self.feed(event("subagent.completed", agent="child")), (0, 0))
 
     def test_child_stop_and_opt_in_do_not_clear_root(self):
         for opt_in in ("0", "1"):

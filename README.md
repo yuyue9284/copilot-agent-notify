@@ -4,7 +4,8 @@ A GitHub Copilot CLI plugin that displays a desktop notification when the main
 agent finishes a turn, or when Copilot needs permission or additional user
 input. Subagent completion alerts are disabled by default and can be enabled.
 Inside Zellij, it also decorates the originating pane and its tab with working
-and attention icons. It does not change the outer Windows Terminal tab title.
+and attention icons. Windows Terminal also gets a session-wide progress
+indicator, independent of the focused pane. The plugin does not set its tab title.
 
 Notifications identify the Copilot instance and session:
 
@@ -102,6 +103,38 @@ leaves that tab working until B finishes. Separate tabs are aggregated
 independently, including inactive tabs. Idle names have no checkmark or other
 permanent decoration.
 
+### Outer Windows Terminal indicator
+
+When running under Windows Terminal (`WT_SESSION` is present), the coordinator
+also aggregates all registered Copilot sessions across the Zellij session:
+
+- Working: an indeterminate progress ring replaces the outer tab's normal icon.
+- Input or permission needed: a paused, full progress ring takes precedence.
+- All idle: the progress ring clears and the normal tab icon returns.
+
+This is Windows Terminal's progress UI, not an hourglass in its title. Zellij
+can still change the outer title when focus moves, but that does not clear the
+progress indicator. Inner pane/tab icons keep their per-pane/tab meaning.
+Progress can also appear on Windows Terminal's taskbar button.
+
+Supported on WSL/Linux and native Windows, for explicitly named interactive
+clients such as `zellij attach term` or `zellij --session term`. Unnamed attach,
+SSH clients, and other terminals are not targeted. New attached clients are
+discovered about every five seconds. Native Windows requires Windows PowerShell
+for client discovery. Each matching Windows Terminal client gets the indicator.
+It is delivered directly to the client's outer terminal, not through a Zellij pane.
+Native console attachment runs in a short-lived helper so it cannot invalidate
+the coordinator's standard handles or prevent later idle-state updates.
+
+`COPILOT_NOTIFY_OUTER_PROGRESS=0` opts out without disabling inner icons or
+desktop notifications; unset/empty/`1` enables it. Restart the coordinator after
+changing this setting. The feature shares Windows Terminal's progress channel:
+other programs writing progress to the same outer terminal can replace it.
+The coordinator tracks the client terminals it has written to, but cannot detect
+another program taking over that progress channel. After detach it attempts to
+clear through the original parent terminal; if both processes exited, restoration
+is unavailable. A crashed coordinator recovers its progress journal on restart.
+
 ### State and lifecycle
 
 `sessionStart`, `userPromptSubmitted`, and `agentStop` register the session.
@@ -140,8 +173,10 @@ unavailable and exits rather than retrying forever.
   working. Queued/system/child messages do not independently start a root turn.
   Turn numbers are not assumed monotonic.
 - `assistant.turn_end` does **not** mean the request finished. Idle requires
-  both a root assistant message without tool requests and a successful matching
-  root `agentStop` hook end, in either order. A later actual turn starts work
+  both a root assistant message without tool requests and a completed matching
+  root `agentStop` hook, in either order. Hook failure is logged, but does not
+  keep a finished response working merely because notification delivery failed.
+  A later actual turn starts work
   again, including stop-hook continuations. This is transcript-observed state,
   not a contractual CLI "request complete" API: a stop hook that subsequently
   blocks can cause a brief idle interval before continuation appears.
@@ -186,7 +221,8 @@ sessions named `term` therefore never share state. Keep the cache OS-local.
 `COPILOT_NOTIFY_ZELLIJ` can point to an explicit Zellij executable.
 
 `status.json` reports the writer PID, start identity, heartbeat, registration
-count, and last error. `coordinator.log` records startup, shutdown, and changed
+count, last error, and a separate `outer_error` for progress delivery.
+`coordinator.log` records startup, shutdown, and changed
 errors, rotating at 256 KiB with one backup. Startup/dependency failures report
 to hook stderr; title failures do not gate the separate notification hooks.
 Notification stdout/schema is unchanged.

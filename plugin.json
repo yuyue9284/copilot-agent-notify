@@ -1,7 +1,7 @@
 {
   "name": "personal-agent-notify",
   "description": "Identifiable desktop notifications and per-pane/tab Zellij activity indicators for Copilot CLI.",
-  "version": "1.6.1",
+  "version": "1.7.0",
   "author": {
     "name": "yuyu3"
   },
