@@ -509,6 +509,42 @@ class RuntimeTests(Files):
             self.assertEqual(result.stdout, "")
         self.wait_for(lambda s: s["tabs"][0]["name"] == activity.prefix((1, 0)) + "work")
 
+    def test_outer_terminal_progress_clears_after_failed_notification(self):
+        if not sys.platform.startswith("linux"):
+            self.skipTest("Linux outer-terminal PTY integration")
+        import pty
+        import select
+        client_script = self.directory / "zellij"
+        client_script.write_text("#!/bin/sh\nread line\n")
+        client_script.chmod(0o700)
+        master, slave = pty.openpty()
+        self.env["WT_SESSION"] = "isolated-progress-test"
+        client = subprocess.Popen([str(client_script), "attach", self.session],
+                                  stdin=subprocess.PIPE, stdout=slave, stderr=slave,
+                                  env=self.env)
+
+        def wait_for_signal(expected):
+            output = b""
+            deadline = time.monotonic() + 15
+            while expected not in output and time.monotonic() < deadline:
+                if select.select([master], [], [], 0.2)[0]:
+                    output += os.read(master, 4096)
+            self.assertIn(expected, output)
+
+        try:
+            path = self.transcript("a", [busy()])
+            self.assert_process(self.launch())
+            wait_for_signal(b"\x1b]9;4;3;0\x07")
+            self.write_events(path, [*finish("a")[:2],
+                                    event("hook.end", hookInvocationId="stop", success=False)], "a")
+            wait_for_signal(b"\x1b]9;4;0;0\x07\x07")
+            self.wait_for(lambda s: s["tabs"][0]["name"] == "work")
+        finally:
+            client.stdin.close()
+            client.wait(timeout=5)
+            os.close(slave)
+            os.close(master)
+
     def test_non_zellij_and_disabled_do_not_create_state(self):
         self.transcript("a", [busy()])
         for changes in ({"ZELLIJ_SESSION_NAME": ""}, {"COPILOT_NOTIFY_ICONS": "0"}):

@@ -16,8 +16,11 @@ def progress_state(counts):
     return 3 if counts[0] else 0
 
 
-def progress_sequence(state):
-    return "\x1b]9;4;%d;%d\x07" % (state, 100 if state == 4 else 0)
+def progress_sequence(state, completed=False):
+    if completed and state != 0:
+        raise ValueError("completion alert requires idle progress")
+    sequence = "\x1b]9;4;%d;%d\x07" % (state, 100 if state == 4 else 0)
+    return sequence + ("\x07" if completed else "")
 
 
 def attaches_to(args, session):
@@ -183,10 +186,10 @@ class OuterProgress:
                                     parent_token=self.process_token(parent), **extra)
         return result
 
-    def write(self, target, state):
+    def write(self, target, state, completed=False):
         pid = target["pid"]
         if self.process_token(pid) != target["token"]:
-            if state:
+            if state or completed:
                 self.next_discovery = 0
                 raise ProcessLookupError("Zellij client exited before progress write")
             # After detach, clear only through the original, still-live parent console.
@@ -194,7 +197,7 @@ class OuterProgress:
             if not target["parent_token"] or self.process_token(pid) != target["parent_token"]:
                 self.log.warning("outer progress restoration unavailable: client and parent exited")
                 return
-        text = progress_sequence(state)
+        text = progress_sequence(state, completed)
         if os.name == "nt":
             write_windows(pid, text)
             return
@@ -243,7 +246,12 @@ class OuterProgress:
                 self.owned[key] = target
                 self.atomic_json(self.journal, self.owned)
             if state or key in self.owned:
-                self.write(target, state)
+                completed = state == 0 and self.applied.get(key) in (3, 4)
+                if completed:
+                    self.write(target, state, completed=True)
+                else:
+                    self.write(target, state)
+                self.log.info("outer progress client=%s state=%d completed=%s", key, state, completed)
             self.applied[key] = state
             if not state and key in self.owned:
                 del self.owned[key]
@@ -253,7 +261,8 @@ class OuterProgress:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("pid", type=int)
-    parser.add_argument("sequence", choices=[progress_sequence(state) for state in (0, 3, 4)])
+    parser.add_argument("sequence", choices=[progress_sequence(state) for state in (0, 3, 4)]
+                        + [progress_sequence(0, completed=True)])
     args = parser.parse_args()
     if os.name != "nt" or args.pid <= 0:
         parser.error("a positive native Windows console PID is required")

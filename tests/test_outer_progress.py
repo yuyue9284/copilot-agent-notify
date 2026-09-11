@@ -57,8 +57,43 @@ class OuterProgressTests(Files):
         self.outer.update((0, 1))
         self.outer.write.assert_called_with(self.target, 4)
         self.outer.update((0, 0))
-        self.outer.write.assert_called_with(self.target, 0)
+        self.outer.write.assert_called_with(self.target, 0, completed=True)
         self.assertEqual(activity.read_json(self.journal), {})
+
+    def test_last_session_finishing_alerts_once_per_work_interval(self):
+        self.outer.update((2, 0))
+        self.outer.update((1, 0))
+        self.outer.write.assert_called_once_with(self.target, 3)
+        self.outer.update((0, 0))
+        self.outer.write.assert_called_with(self.target, 0, completed=True)
+        self.outer.write.reset_mock()
+        self.outer.update((0, 0))
+        self.outer.write.assert_not_called()
+        self.outer.update((1, 0))
+        self.outer.update((0, 0))
+        self.outer.write.assert_called_with(self.target, 0, completed=True)
+
+    def test_completion_sequence_clears_progress_then_rings_bell(self):
+        self.assertEqual(progress_sequence(0, completed=True), "\x1b]9;4;0;0\x07\x07")
+        with self.assertRaises(ValueError):
+            progress_sequence(3, completed=True)
+
+    def test_completion_failure_is_retried_without_marking_idle(self):
+        self.outer.update((1, 0))
+        self.outer.write.side_effect = OSError("unavailable")
+        with self.assertLogs("outer-progress-tests", level="ERROR"):
+            self.assertIsNotNone(self.outer.update((0, 0)))
+        self.assertEqual(self.outer.applied["10"], 3)
+        self.outer.write.side_effect = None
+        self.assertIsNone(self.outer.update((0, 0)))
+        self.outer.write.assert_called_with(self.target, 0, completed=True)
+
+    def test_native_completion_delivers_clear_and_bell(self):
+        outer = self.create()
+        with patch("outer_progress.os.name", "nt"), \
+                patch("outer_progress.write_windows") as write_windows:
+            outer.write(self.target, 0, completed=True)
+        write_windows.assert_called_once_with(10, "\x1b]9;4;0;0\x07\x07")
 
     def test_idle_does_not_clear_unowned_terminal_progress(self):
         self.outer.update((0, 0))

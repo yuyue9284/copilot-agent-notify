@@ -141,7 +141,15 @@ also aggregates all registered Copilot sessions across the Zellij session:
 
 - Working: an indeterminate progress ring replaces the outer tab's normal icon.
 - Input or permission needed: a paused, full progress ring takes precedence.
-- All idle: the progress ring clears and the normal tab icon returns.
+- Last active session finishes: the progress ring clears and an outer terminal
+  bell requests attention so you can check the results. Other still-working or
+  waiting sessions prevent this all-finished alert.
+
+The completion bell is sent once per observed active-to-idle transition, not
+repeated on idle polls, startup, detach cleanup, or coordinator shutdown.
+Windows Terminal controls the bell badge's appearance and clears it on focus
+(an already focused tab may show it only briefly). It is not a persistent unread
+counter. Existing per-session desktop notifications and bells remain enabled.
 
 This is Windows Terminal's progress UI, not an hourglass in its title. Zellij
 can still change the outer title when focus moves, but that does not clear the
@@ -156,6 +164,8 @@ for client discovery. Each matching Windows Terminal client gets the indicator.
 It is delivered directly to the client's outer terminal, not through a Zellij pane.
 Native console attachment runs in a short-lived helper so it cannot invalidate
 the coordinator's standard handles or prevent later idle-state updates.
+Progress transitions are logged as `outer progress client=PID state=N`:
+`0` clears the indicator, `3` means working, and `4` means attention.
 
 `COPILOT_NOTIFY_OUTER_PROGRESS=0` opts out without disabling inner icons or
 desktop notifications; unset/empty/`1` enables it. Restart the coordinator after
@@ -346,8 +356,9 @@ For live verification without installing or touching existing panes:
 Review/live validation should precede reinstalling. After approval, run
 `copilot plugin install .` separately in WSL and native
 Windows (using each environment's local repository path), then restart their
-Copilot processes. Each OS needs its own Python and Zellij. No outer Windows
-Terminal aggregate/title routing is implemented in this version.
+Copilot processes. Each OS needs its own Python and Zellij. Outer Windows
+Terminal progress is aggregated separately for each OS-local Zellij session;
+the plugin does not override the outer tab title.
 
 ## Notification delivery
 
@@ -356,6 +367,11 @@ compiled `windows-helper/bin/copilot-notify.exe` WinRT client on Windows and
 WSL. Windows toasts are attributed to Windows Terminal and remain in
 Notification Center. If no desktop notification provider is available on
 Linux, the plugin emits a terminal bell instead.
+
+WSL uses its `/init` interop launcher when available, so a missing automatic
+Windows-executable handler does not prevent notification delivery. PowerShell
+is not required for this WSL delivery path. Launcher/notifier errors are
+reported rather than silently treated as successful notifications.
 
 On Windows and WSL, each successfully submitted notification also sends a BEL
 to the originating terminal, allowing Windows Terminal to show its tab bell

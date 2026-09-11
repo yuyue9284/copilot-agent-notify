@@ -169,9 +169,17 @@ message="$action."
 [[ -n "$cwd" ]] && message="$message"$'\n'"Go to: $cwd"
 
 notify_wsl() {
-  local notifier
-  notifier="$(dirname "$0")/../windows-helper/bin/copilot-notify.exe"
-  "$notifier" "$title" "$message" "$notification_tag" >/dev/null || return $?
+  local notifier_dir notifier
+  local launcher=/init
+  notifier_dir=$(cd -- "$(dirname "$0")/../windows-helper/bin" && pwd) || return $?
+  notifier="$notifier_dir/copilot-notify.exe"
+  # Explicit interop still works when WSL's automatic .exe handler is unavailable.
+  if [[ -x "$launcher" ]]; then
+    # WSL's binfmt "P" convention requires the executable path and preserved argv[0].
+    "$launcher" "$notifier" "$notifier" "$title" "$message" "$notification_tag" >/dev/null || return $?
+  else
+    "$notifier" "$title" "$message" "$notification_tag" >/dev/null || return $?
+  fi
   bash "$(dirname "$0")/bell.sh"
 }
 
@@ -181,8 +189,7 @@ on run argv
   display notification (item 2 of argv) with title (item 1 of argv)
 end run
 APPLESCRIPT
-elif grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null &&
-     command -v powershell.exe >/dev/null 2>&1; then
+elif grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null; then
   notify_wsl || exit $?
 elif command -v notify-send >/dev/null 2>&1; then
   notify-send --app-name="$app_name" "$title" "$message" \

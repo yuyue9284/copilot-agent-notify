@@ -1,9 +1,10 @@
-"""Exercise the unchanged notification scripts with fake desktop providers."""
+"""Exercise notification scripts with fake desktop providers."""
 
 import json
 import os
 from pathlib import Path
 import shutil
+import shlex
 import subprocess
 import unittest
 import uuid
@@ -116,6 +117,41 @@ class NotificationTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("invalid transcript session header", result.stderr)
                 self.assertEqual(captured, "")
+
+    def test_wsl_explicit_interop_and_failure_propagation(self):
+        if "bash" not in self.runners:
+            self.skipTest("WSL launcher routing uses Bash")
+        scripts = self.directory / "scripts"
+        scripts.mkdir()
+        binaries = self.directory / "windows-helper/bin"
+        binaries.mkdir(parents=True)
+        launcher = self.directory / "interop"
+        launcher.write_text('#!/bin/sh\nprintf "interop\\n" >> "$CAPTURE_FILE"\n'
+                            '[ "$1" = "$2" ] || exit 99\nshift\nexec "$@"\n')
+        launcher.chmod(0o700)
+        notifier = binaries / "copilot-notify.exe"
+        notifier.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$CAPTURE_FILE"\n'
+                            'exit "${NOTIFIER_EXIT:-0}"\n')
+        notifier.chmod(0o700)
+        (scripts / "bell.sh").write_text('printf "bell\\n" >> "$CAPTURE_FILE"\n')
+        source = (ROOT / "scripts/notify.sh").read_text()
+        self.assertEqual(source.count("local launcher=/init"), 1)
+        script = scripts / "notify.sh"
+        script.write_text(source.replace("local launcher=/init",
+                                         "local launcher=" + shlex.quote(str(launcher))))
+        (self.directory / "bin/grep").write_text("#!/bin/sh\nexit 0\n")
+        self.runners["bash"] = [self.runners["bash"][0], str(script)]
+        for code in ("0", "1"):
+            with self.subTest(exit_code=code):
+                self.env["NOTIFIER_EXIT"] = code
+                result, captured = self.run_hook("bash", "agentStop", {
+                    "sessionId": "root-session", "transcriptPath": str(self.transcript),
+                })
+                self.assertEqual(result.returncode, int(code), result.stderr)
+                self.assertEqual(captured.count("interop\n"), 1)
+                self.assertIn("[#root-ses]", captured)
+                self.assertIn("Agent finished responding", captured)
+                self.assertEqual("bell\n" in captured, code == "0")
 
 
 if __name__ == "__main__":

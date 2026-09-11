@@ -27,7 +27,7 @@ class ConsoleLifetimeTests(Files):
                 "try:\n"
                 "    write_windows(int(sys.argv[2]),progress_sequence(3))\n"
                 "    subprocess.run(['cmd.exe','/c','exit','0'],capture_output=True,check=True)\n"
-                "    write_windows(int(sys.argv[2]),progress_sequence(0))\n"
+                "    write_windows(int(sys.argv[2]),progress_sequence(0,completed=True))\n"
                 "    subprocess.run(['cmd.exe','/c','exit','0'],capture_output=True,check=True)\n"
                 "except Exception:\n"
                 "    Path(sys.argv[3]).write_text(traceback.format_exc())\n"
