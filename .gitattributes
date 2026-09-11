@@ -3,3 +3,4 @@
 *.py text eol=lf
 *.ps1 text eol=lf
 *.exe binary
+.githooks/* text eol=lf

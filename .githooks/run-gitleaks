@@ -1,0 +1,32 @@
+#!/bin/sh
+set -eu
+
+scanner=${GITLEAKS_BIN:-}
+if [ -z "$scanner" ]; then
+    scanner=$(command -v gitleaks 2>/dev/null || true)
+    if [ -z "$scanner" ]; then
+        case "$(uname -s)" in
+            MINGW*|MSYS*|CYGWIN*) scanner="$HOME/.local/bin/gitleaks.exe" ;;
+            *) scanner="$HOME/.local/bin/gitleaks" ;;
+        esac
+    fi
+fi
+
+if ! command -v "$scanner" >/dev/null 2>&1; then
+    printf '%s\n' 'Secret scan blocked: install Gitleaks or set GITLEAKS_BIN to its native executable.' >&2
+    exit 1
+fi
+
+case "${1:-}" in
+    staged)
+        exec "$scanner" git --pre-commit --staged --redact --no-banner --ignore-gitleaks-allow .
+        ;;
+    history)
+        # Include earlier/deleted secrets and merge-resolution changes, not just HEAD's files.
+        exec "$scanner" git --log-opts="--all --full-history -m" --redact --no-banner --ignore-gitleaks-allow .
+        ;;
+    *)
+        printf '%s\n' 'Usage: run-gitleaks staged|history' >&2
+        exit 1
+        ;;
+esac

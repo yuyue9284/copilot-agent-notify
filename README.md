@@ -42,6 +42,37 @@ copilot plugin install yuyue9284/copilot-agent-notify
 Restart Copilot CLI after installation. Use `copilot plugin list` or
 `/plugin list` to confirm that `personal-agent-notify` is enabled.
 
+## Secret-scanning Git hooks
+
+This repository includes Gitleaks hooks in `.githooks/`:
+
+- `pre-commit` scans the staged changes, not unstaged files.
+- `pre-push` scans all local Git history, including all refs and merge diffs.
+  This intentionally also blocks secrets on other local branches or in earlier
+  commits, even if the secret was deleted from the current files.
+
+Install Gitleaks 8.30.1 or later natively for each environment where you use Git.
+The hooks look for `gitleaks` on `PATH`, then `~/.local/bin/gitleaks` on Unix or
+`~/.local/bin/gitleaks.exe` under Git for Windows. `GITLEAKS_BIN` can specify a
+different executable. Use a Linux binary in WSL, not a Windows executable.
+
+Enable the hooks **once per clone**:
+
+```bash
+git config --local core.hooksPath .githooks
+```
+
+Check for existing hooks or a configured `core.hooksPath` before changing it;
+Git uses only one hooks directory. Hooks are not automatically enabled by cloning.
+The scanner must be installed separately; no binaries or credentials are stored
+in this repository. Missing scanners, scan errors, and findings block the operation.
+Findings redact secret values, and inline `gitleaks:allow` comments are not honored.
+
+These are local safeguards, not a guarantee: Git hooks can be bypassed and scanners
+cannot identify every secret. GitHub push protection is a complementary server-side
+control. A secret that has already been exposed should be revoked or rotated,
+not merely deleted from the latest revision.
+
 ## Configure subagent alerts
 
 `COPILOT_NOTIFY_SUBAGENTS` controls subagent completion alerts:
