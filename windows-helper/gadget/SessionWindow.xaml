@@ -6,9 +6,93 @@
   <Window.Resources>
     <Visibility x:Key="DetailVisibility">Visible</Visibility>
     <System:Double xmlns:System="clr-namespace:System;assembly=mscorlib" x:Key="SessionRowHeight">70</System:Double>
+    <System:Double xmlns:System="clr-namespace:System;assembly=mscorlib"
+                   x:Key="{x:Static SystemParameters.VerticalScrollBarWidthKey}">14</System:Double>
+    <System:Double xmlns:System="clr-namespace:System;assembly=mscorlib"
+                   x:Key="{x:Static SystemParameters.HorizontalScrollBarHeightKey}">14</System:Double>
     <Thickness x:Key="CellPadding">18,0</Thickness>
     <Thickness x:Key="HeaderPadding">18,13</Thickness>
     <SolidColorBrush x:Key="Muted" Color="#91A0B5"/>
+    <Style x:Key="ScrollPageButton" TargetType="RepeatButton">
+      <Setter Property="Focusable" Value="False"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="RepeatButton">
+            <Border Background="Transparent"/>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style x:Key="ScrollThumb" TargetType="Thumb">
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Thumb">
+            <Border Background="Transparent" Padding="3">
+              <Border x:Name="ThumbSurface" Background="#43546A" CornerRadius="4"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="ThumbSurface" Property="Background" Value="#6A839C"/>
+              </Trigger>
+              <Trigger Property="IsDragging" Value="True">
+                <Setter TargetName="ThumbSurface" Property="Background" Value="#74D9C7"/>
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False">
+                <Setter TargetName="ThumbSurface" Property="Opacity" Value="0.35"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style TargetType="ScrollBar">
+      <Setter Property="Width" Value="14"/>
+      <Setter Property="Background" Value="#161D28"/>
+      <Setter Property="Focusable" Value="False"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ScrollBar">
+            <Border Background="{TemplateBinding Background}" CornerRadius="7">
+              <Track x:Name="PART_Track" Orientation="{TemplateBinding Orientation}"
+                     Minimum="{TemplateBinding Minimum}" Maximum="{TemplateBinding Maximum}"
+                     ViewportSize="{TemplateBinding ViewportSize}" IsDirectionReversed="True"
+                     Value="{Binding Value, RelativeSource={RelativeSource TemplatedParent}, Mode=TwoWay}">
+                <Track.Resources>
+                  <System:Double xmlns:System="clr-namespace:System;assembly=mscorlib"
+                                 x:Key="{x:Static SystemParameters.VerticalScrollBarButtonHeightKey}">48</System:Double>
+                  <System:Double xmlns:System="clr-namespace:System;assembly=mscorlib"
+                                 x:Key="{x:Static SystemParameters.HorizontalScrollBarButtonWidthKey}">48</System:Double>
+                </Track.Resources>
+                <Track.DecreaseRepeatButton>
+                  <RepeatButton x:Name="PageBefore" Style="{StaticResource ScrollPageButton}"
+                                Command="{x:Static ScrollBar.PageUpCommand}"/>
+                </Track.DecreaseRepeatButton>
+                <Track.Thumb>
+                  <Thumb Style="{StaticResource ScrollThumb}"/>
+                </Track.Thumb>
+                <Track.IncreaseRepeatButton>
+                  <RepeatButton x:Name="PageAfter" Style="{StaticResource ScrollPageButton}"
+                                Command="{x:Static ScrollBar.PageDownCommand}"/>
+                </Track.IncreaseRepeatButton>
+              </Track>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="Orientation" Value="Horizontal">
+                <Setter TargetName="PART_Track" Property="IsDirectionReversed" Value="False"/>
+                <Setter TargetName="PageBefore" Property="Command" Value="{x:Static ScrollBar.PageLeftCommand}"/>
+                <Setter TargetName="PageAfter" Property="Command" Value="{x:Static ScrollBar.PageRightCommand}"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+      <Style.Triggers>
+        <Trigger Property="Orientation" Value="Horizontal">
+          <Setter Property="Width" Value="Auto"/>
+          <Setter Property="Height" Value="14"/>
+        </Trigger>
+      </Style.Triggers>
+    </Style>
     <Style TargetType="ToolTip">
       <Setter Property="Background" Value="#222D3E"/>
       <Setter Property="Foreground" Value="#ECF1F7"/>

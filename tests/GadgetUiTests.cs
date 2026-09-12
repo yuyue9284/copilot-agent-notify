@@ -242,6 +242,77 @@ public static class GadgetUiTests
         app.Apply(new Snapshot { rows = new SessionData[0], errors = new string[0] });
     }
 
+    private static void TestScrollbars(SessionWindow app)
+    {
+        var data = Enumerable.Range(0, 60).Select(index => new SessionData {
+            id = "scroll-" + index.ToString("D3"), title = "Session " + index,
+            source = "Windows", cwd = @"C:\work\scroll-test", status = "Done", pid = 1234
+        }).ToArray();
+        app.Apply(new Snapshot { rows = data, errors = new string[0] });
+        foreach (bool compact in new[] { false, true })
+        {
+            app.SetCompact(compact, false);
+            app.Window.Width = app.Window.MinWidth;
+            app.Window.Height = app.Window.MinHeight;
+            Pump();
+            var viewer = Descendants<ScrollViewer>(app.Grid).First();
+            var vertical = Descendants<ScrollBar>(app.Grid).Single(bar => bar.Orientation == Orientation.Vertical);
+            Check(vertical.IsVisible && vertical.ActualWidth == 14,
+                  "Missing slim vertical scrollbar: visible=" + vertical.IsVisible +
+                  ", width=" + vertical.ActualWidth + ", style=" + (vertical.Style == null ? "none" : "present"));
+            var track = (Track)vertical.Template.FindName("PART_Track", vertical);
+            Check(track != null && track.IsDirectionReversed, "Vertical track direction incorrect");
+            Check(track.Thumb.Template.FindName("ThumbSurface", track.Thumb) != null, "Custom thumb missing");
+            Check(track.Thumb.ActualHeight >= 24, "Scrollbar thumb is too small to grab");
+            viewer.ScrollToTop();
+            Pump();
+            ((IInvokeProvider)UIElementAutomationPeer.CreatePeerForElement(track.IncreaseRepeatButton)
+                .GetPattern(PatternInterface.Invoke)).Invoke();
+            Pump();
+            Check(viewer.VerticalOffset > 0, "Track page-down does not scroll");
+            double before = viewer.VerticalOffset;
+            track.Thumb.RaiseEvent(new DragDeltaEventArgs(0, 20) { RoutedEvent = Thumb.DragDeltaEvent });
+            Pump();
+            Check(viewer.VerticalOffset > before, "Dragging thumb down does not scroll down");
+            viewer.ScrollToTop();
+            Pump();
+            viewer.RaiseEvent(new MouseWheelEventArgs(Mouse.PrimaryDevice, Environment.TickCount, -120)
+                { RoutedEvent = Mouse.MouseWheelEvent });
+            Pump();
+            Check(viewer.VerticalOffset > 0, "Mouse-wheel scrolling broke");
+            app.Grid.Focus();
+            app.Grid.SelectedIndex = 0;
+            app.Grid.CurrentCell = new DataGridCellInfo(app.Grid.Items[0], app.Grid.Columns[0]);
+            app.Grid.ScrollIntoView(app.Grid.Items[0], app.Grid.Columns[0]);
+            Pump();
+            app.Grid.RaiseEvent(new KeyEventArgs(Keyboard.PrimaryDevice,
+                PresentationSource.FromVisual(app.Grid), Environment.TickCount, Key.PageDown)
+                { RoutedEvent = Keyboard.KeyDownEvent });
+            Pump();
+            Check(app.Grid.SelectedIndex > 0, "Keyboard PageDown navigation broke");
+
+            DataGridLength width = app.Grid.Columns[0].Width;
+            app.Grid.Columns[0].Width = 900;
+            Pump();
+            var horizontal = Descendants<ScrollBar>(app.Grid).Single(bar => bar.Orientation == Orientation.Horizontal);
+            Check(horizontal.IsVisible && horizontal.ActualHeight == 14, "Missing slim horizontal scrollbar");
+            var horizontalTrack = (Track)horizontal.Template.FindName("PART_Track", horizontal);
+            Check(!horizontalTrack.IsDirectionReversed, "Horizontal track direction incorrect");
+            ((IInvokeProvider)UIElementAutomationPeer.CreatePeerForElement(horizontalTrack.IncreaseRepeatButton)
+                .GetPattern(PatternInterface.Invoke)).Invoke();
+            Pump();
+            Check(viewer.HorizontalOffset > 0, "Horizontal track page-right does not scroll");
+            app.Grid.Columns[0].Width = width;
+            string screenshot = Environment.GetEnvironmentVariable("COPILOT_GADGET_SCREENSHOT");
+            if (!String.IsNullOrEmpty(screenshot))
+                Screenshot(app, Path.Combine(Path.GetDirectoryName(screenshot),
+                           compact ? "gadget-scrollbar-compact.png" : "gadget-scrollbar-comfortable.png"));
+        }
+        app.SetCompact(false, false);
+        app.Apply(Sample());
+        Pump();
+    }
+
     [STAThread]
     public static int Main()
     {
@@ -301,6 +372,7 @@ public static class GadgetUiTests
             TestUnread(app);
             TestSharedProcess(app);
             TestForget(app, preferences);
+            TestScrollbars(app);
             app.Apply(Sample());
             string screenshot = Environment.GetEnvironmentVariable("COPILOT_GADGET_SCREENSHOT");
             if (!String.IsNullOrEmpty(screenshot)) Screenshot(app, screenshot);

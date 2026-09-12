@@ -82,6 +82,8 @@ Click **Session**, **Environment**, **Status**, or **ID** to sort; click the sam
 header again to reverse direction. The arrow shows the current direction, and
 both the chosen sort and selection survive live updates. Status sorts by attention,
 working, loading, unknown, then done, rather than alphabetically.
+Both layouts use slim, rounded dark scrollbars with hover and drag feedback;
+mouse-wheel scrolling, track paging, dragging, and keyboard navigation remain available.
 
 ### Layouts and unread completions
 
