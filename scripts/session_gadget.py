@@ -81,6 +81,7 @@ class WslWorker:
         self.updates = updates
         self.process = None
         self.stopping = threading.Event()
+        self.bootstrap_sent = threading.Event()
         self.close_lock = threading.Lock()
         self.thread = threading.Thread(target=self.run, daemon=True)
 
@@ -91,15 +92,24 @@ class WslWorker:
         source = "WSL:" + self.distro
         error_thread = None
         try:
+            if self.stopping.is_set():
+                return
             directory = Path(__file__).resolve().parent
             sources = {name: (directory / (name + ".py")).read_text(encoding="utf-8")
                        for name in ("outer_progress", "activity", "session_probe")}
             # Run the exact same reducer in each distro; no plugin install, UNC
             # mount assumption, shell interpolation, or distribution wake-up.
-            self.process = subprocess.Popen(
-                ["wsl.exe", "--distribution", self.distro, "--exec", "python3", "-u",
-                 "-c", BOOTSTRAP], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE, **hidden_options())
+            # Serialize creation/publication with close so a completed cancellation
+            # cannot miss a child that is about to be launched.
+            with self.close_lock:
+                if self.stopping.is_set():
+                    return
+                self.process = subprocess.Popen(
+                    ["wsl.exe", "--distribution", self.distro, "--exec", "python3", "-u",
+                     "-c", BOOTSTRAP], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, **hidden_options())
+            if self.stopping.is_set():
+                return
             diagnostics = []
 
             def read_errors():
@@ -112,35 +122,51 @@ class WslWorker:
             error_thread.start()
             self.process.stdin.write((json.dumps(sources) + "\n").encode("utf-8"))
             self.process.stdin.flush()
+            self.bootstrap_sent.set()
             for line in self.process.stdout:
                 if self.stopping.is_set():
                     break
                 snapshot = json.loads(line)
                 if not isinstance(snapshot, dict) or not isinstance(snapshot.get("sessions"), list):
                     raise ValueError("invalid WSL session response")
-                self.updates.put((source, snapshot, time.monotonic()))
+                with self.close_lock:
+                    if self.stopping.is_set():
+                        break
+                    self.updates.put((source, snapshot, time.monotonic()))
             if not self.stopping.is_set():
                 error_thread.join(timeout=2)
                 raise OSError("WSL collector stopped. " + " ".join(diagnostics))
         except (OSError, ValueError) as error:
-            self.updates.put((source, {"sessions": [], "errors": [str(error)]}, time.monotonic()))
+            with self.close_lock:
+                if not self.stopping.is_set():
+                    self.updates.put((source, {"sessions": [], "errors": [str(error)]}, time.monotonic()))
         finally:
             self.close()
             if self.process is not None:
+                try:
+                    self.process.stdin.close()
+                except BrokenPipeError:
+                    pass
                 self.process.stdout.close()
             if error_thread is not None:
                 error_thread.join(timeout=3)
+            elif self.process is not None:
+                self.process.stderr.close()
 
     def close(self):
         self.stopping.set()
         with self.close_lock:
             process = self.process
             if process is not None:
-                if process.stdin and not process.stdin.closed:
+                if self.bootstrap_sent.is_set() and not process.stdin.closed:
                     try:
                         process.stdin.close()
                     except BrokenPipeError:
                         pass
+                elif process.poll() is None:
+                    # Buffered stdin.close() can wait forever for an in-flight
+                    # bootstrap write. Terminate first; the writer owns cleanup.
+                    process.terminate()
                 try:
                     process.wait(timeout=3)
                 except subprocess.TimeoutExpired:

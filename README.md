@@ -176,6 +176,29 @@ Requirements and scope:
 For native-only JSON diagnostics, run `python scripts/session_gadget.py --snapshot`.
 This reads one batch, so large transcripts may report `Loading`.
 
+### Gadget regression tests
+
+On Linux/WSL:
+
+```bash
+PYTHONPATH=tests python3 -m unittest test_session_gadget test_activity test_outer_progress -q
+```
+
+On native Windows, from the repository root:
+
+```powershell
+$env:PYTHONPATH = "tests"
+python -m unittest test_session_gadget -q
+```
+
+The Windows suite compiles the actual WPF window and exercises header clicks,
+live sorting, selection, compact layout persistence, and unread badge transitions.
+Both platforms test collector cancellation before/during process creation, a
+blocked bootstrap pipe, and graceful EOF shutdown. Lifecycle fixtures use local
+test processes, not real WSL sessions. Native UI tests briefly open test windows.
+The optional `COPILOT_GADGET_LIVE_TEST=1` check requires open Windows and WSL Copilot
+sessions and starts real read-only collectors; it is disabled by default.
+
 ## Secret-scanning Git hooks
 
 This repository includes Gitleaks hooks in `.githooks/`:

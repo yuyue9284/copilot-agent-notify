@@ -1,10 +1,12 @@
 import json
+import io
 import os
 from pathlib import Path
 import queue
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -236,6 +238,216 @@ class SourceTests(unittest.TestCase):
                 if process.poll() is None:
                     process.kill()
                     process.wait()
+
+
+class WorkerLifecycleTests(unittest.TestCase):
+    class Process:
+        def __init__(self, blocked=False):
+            self.exited = threading.Event()
+            self.writing = threading.Event()
+            self.release = threading.Event()
+            self.terminated = threading.Event()
+            self.returncode = None
+            self.stdout = io.BytesIO()
+            self.stderr = io.BytesIO()
+            process = self
+
+            class Input(io.BytesIO):
+                def __init__(self):
+                    super().__init__()
+                    self.lock = threading.Lock()
+
+                def write(self, data):
+                    with self.lock:
+                        process.writing.set()
+                        if blocked:
+                            process.release.wait(10)
+                            raise BrokenPipeError("collector terminated")
+                        return super().write(data)
+
+                def close(self):
+                    with self.lock:
+                        super().close()
+                        process.returncode = 0
+                        process.exited.set()
+
+            self.stdin = Input()
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            if not self.exited.wait(timeout):
+                raise subprocess.TimeoutExpired("collector", timeout)
+            return self.returncode
+
+        def terminate(self):
+            self.terminated.set()
+            self.returncode = 1
+            self.release.set()
+            self.exited.set()
+
+        def kill(self):
+            self.terminate()
+
+    def test_cancelled_worker_does_not_launch_after_source_read(self):
+        worker = gadget.WslWorker("Ubuntu", queue.Queue())
+        reading = threading.Event()
+        release = threading.Event()
+        original = Path.read_text
+
+        def read(path, *args, **kwargs):
+            reading.set()
+            release.wait(5)
+            return original(path, *args, **kwargs)
+
+        with patch.object(Path, "read_text", read), \
+                patch.object(gadget.subprocess, "Popen", return_value=self.Process()) as launch:
+            worker.start()
+            try:
+                self.assertTrue(reading.wait(3))
+                worker.close()
+                release.set()
+                worker.thread.join(3)
+                self.assertFalse(worker.thread.is_alive())
+                launch.assert_not_called()
+            finally:
+                release.set()
+                worker.thread.join(5)
+
+    def test_close_interrupts_blocked_bootstrap_before_closing_stdin(self):
+        worker = gadget.WslWorker("Ubuntu", queue.Queue())
+        process = self.Process(blocked=True)
+        closing = threading.Thread(target=worker.close, daemon=True)
+        with patch.object(gadget.subprocess, "Popen", return_value=process):
+            worker.start()
+            try:
+                self.assertTrue(process.writing.wait(3))
+                closing.start()
+                self.assertTrue(process.terminated.wait(2), "Blocked stdin prevented process termination")
+                closing.join(3)
+                worker.thread.join(3)
+                self.assertFalse(closing.is_alive(), "Close did not finish")
+                self.assertFalse(worker.thread.is_alive(), "Worker did not finish")
+                self.assertTrue(worker.updates.empty(), "Cancellation emitted a spurious source error")
+            finally:
+                process.release.set()
+                process.terminate()
+                closing.join(5)
+                worker.thread.join(5)
+
+    def test_cancel_during_process_creation_cleans_up_published_child(self):
+        worker = gadget.WslWorker("Ubuntu", queue.Queue())
+        process = self.Process(blocked=True)
+        creating = threading.Event()
+        release = threading.Event()
+
+        def launch(*args, **kwargs):
+            creating.set()
+            release.wait(5)
+            return process
+
+        closing = threading.Thread(target=worker.close, daemon=True)
+        with patch.object(gadget.subprocess, "Popen", side_effect=launch):
+            worker.start()
+            try:
+                self.assertTrue(creating.wait(3))
+                closing.start()
+                self.assertTrue(worker.stopping.wait(3))
+                release.set()
+                closing.join(3)
+                worker.thread.join(3)
+                self.assertFalse(closing.is_alive())
+                self.assertFalse(worker.thread.is_alive())
+                self.assertIsNotNone(process.poll(), "Cancel left a late-created process alive")
+                self.assertTrue(worker.updates.empty())
+            finally:
+                release.set()
+                process.terminate()
+                closing.join(5)
+                worker.thread.join(5)
+
+    def test_real_pipe_blocked_bootstrap_is_cancelled(self):
+        worker = gadget.WslWorker("Ubuntu", queue.Queue())
+        writing = threading.Event()
+        created = []
+        real_popen = subprocess.Popen
+
+        class Input:
+            def __init__(self, stream):
+                self.stream = stream
+
+            def __getattr__(self, name):
+                return getattr(self.stream, name)
+
+            def write(self, data):
+                writing.set()
+                # Linux can buffer the entire real bootstrap. Fill beyond pipe
+                # capacity so cancellation exercises an actual blocked OS write.
+                return self.stream.write(data + b" " * (4 * 1024 * 1024))
+
+        def launch(*args, **kwargs):
+            process = real_popen([sys.executable, "-c", "import time; time.sleep(60)"], **kwargs)
+            process.stdin = Input(process.stdin)
+            created.append(process)
+            return process
+
+        closing = threading.Thread(target=worker.close, daemon=True)
+        with patch.object(gadget.subprocess, "Popen", side_effect=launch):
+            worker.start()
+            try:
+                self.assertTrue(writing.wait(5))
+                self.assertFalse(worker.bootstrap_sent.wait(.1), "Fixture did not block the real pipe")
+                closing.start()
+                closing.join(5)
+                worker.thread.join(5)
+                self.assertFalse(closing.is_alive(), "Real pipe cancellation hung")
+                self.assertFalse(worker.thread.is_alive(), "Real worker cancellation hung")
+                self.assertIsNotNone(created[0].poll())
+                self.assertTrue(created[0].stdin.closed)
+                self.assertTrue(created[0].stdout.closed)
+                self.assertTrue(created[0].stderr.closed)
+                self.assertTrue(worker.updates.empty())
+            finally:
+                for process in created:
+                    if process.poll() is None:
+                        process.kill()
+                    process.wait(timeout=5)
+                if closing.ident is not None:
+                    closing.join(5)
+                worker.thread.join(5)
+
+    def test_ready_collector_gets_graceful_eof_without_termination(self):
+        worker = gadget.WslWorker("Ubuntu", queue.Queue())
+        real_popen = subprocess.Popen
+        created = []
+        script = ("import sys; sys.stdin.readline(); "
+                  "print('{\"sessions\": [], \"errors\": []}', flush=True); sys.stdin.read()")
+
+        def launch(*args, **kwargs):
+            process = real_popen([sys.executable, "-u", "-c", script], **kwargs)
+            created.append(process)
+            return process
+
+        with patch.object(gadget.subprocess, "Popen", side_effect=launch):
+            worker.start()
+            try:
+                source, snapshot, _ = worker.updates.get(timeout=5)
+                self.assertEqual((source, snapshot), ("WSL:Ubuntu", {"sessions": [], "errors": []}))
+                self.assertTrue(worker.bootstrap_sent.is_set())
+                with patch.object(created[0], "terminate", wraps=created[0].terminate) as terminate:
+                    worker.close()
+                    worker.thread.join(5)
+                    self.assertFalse(worker.thread.is_alive())
+                    terminate.assert_not_called()
+                self.assertEqual(created[0].returncode, 0)
+                self.assertTrue(worker.updates.empty())
+            finally:
+                for process in created:
+                    if process.poll() is None:
+                        process.kill()
+                    process.wait(timeout=5)
+                worker.thread.join(5)
 
 
 @unittest.skipUnless(os.name == "nt", "Native Windows gadget UI")
