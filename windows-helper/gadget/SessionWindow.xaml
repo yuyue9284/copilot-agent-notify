@@ -1,0 +1,298 @@
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Copilot Sessions" Width="900" Height="530" MinWidth="640" MinHeight="380"
+        WindowStartupLocation="CenterScreen" Background="#10151D" Foreground="#ECF1F7"
+        FontFamily="Segoe UI" FontSize="13" UseLayoutRounding="True">
+  <Window.Resources>
+    <Visibility x:Key="DetailVisibility">Visible</Visibility>
+    <System:Double xmlns:System="clr-namespace:System;assembly=mscorlib" x:Key="SessionRowHeight">70</System:Double>
+    <Thickness x:Key="CellPadding">18,0</Thickness>
+    <Thickness x:Key="HeaderPadding">18,13</Thickness>
+    <SolidColorBrush x:Key="Muted" Color="#91A0B5"/>
+    <Style TargetType="ToolTip">
+      <Setter Property="Background" Value="#222D3E"/>
+      <Setter Property="Foreground" Value="#ECF1F7"/>
+      <Setter Property="BorderBrush" Value="#364459"/>
+      <Setter Property="Padding" Value="10,6"/>
+    </Style>
+    <Style TargetType="DataGridColumnHeader">
+      <Setter Property="Foreground" Value="#91A0B5"/>
+      <Setter Property="Background" Value="#181F2B"/>
+      <Setter Property="Padding" Value="{DynamicResource HeaderPadding}"/>
+      <Setter Property="FontSize" Value="11"/>
+      <Setter Property="FontWeight" Value="SemiBold"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="DataGridColumnHeader">
+            <Border x:Name="Surface" Background="{TemplateBinding Background}"
+                    Padding="{TemplateBinding Padding}" BorderBrush="#263244" BorderThickness="0,0,0,1">
+              <StackPanel Orientation="Horizontal">
+                <ContentPresenter VerticalAlignment="Center"/>
+                <TextBlock x:Name="Arrow" Text="" Margin="7,0,0,0" Foreground="#74D9C7"/>
+              </StackPanel>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="Surface" Property="Background" Value="#243045"/>
+                <Setter Property="Foreground" Value="#ECF1F7"/>
+              </Trigger>
+              <Trigger Property="SortDirection" Value="Ascending">
+                <Setter TargetName="Arrow" Property="Text" Value="&#x2191;"/>
+              </Trigger>
+              <Trigger Property="SortDirection" Value="Descending">
+                <Setter TargetName="Arrow" Property="Text" Value="&#x2193;"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style TargetType="DataGridCell">
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="Padding" Value="{DynamicResource CellPadding}"/>
+      <Setter Property="Foreground" Value="#ECF1F7"/>
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="DataGridCell">
+            <Border Padding="{TemplateBinding Padding}" Background="{TemplateBinding Background}">
+              <ContentPresenter VerticalAlignment="Center"/>
+            </Border>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style TargetType="DataGridRow">
+      <Setter Property="Background" Value="#161D28"/>
+      <Setter Property="BorderBrush" Value="#222D3C"/>
+      <Setter Property="BorderThickness" Value="0,0,0,1"/>
+      <Setter Property="MinHeight" Value="{DynamicResource SessionRowHeight}"/>
+      <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+      <Style.Triggers>
+        <Trigger Property="IsMouseOver" Value="True">
+          <Setter Property="Background" Value="#1C2838"/>
+        </Trigger>
+        <Trigger Property="IsSelected" Value="True">
+          <Setter Property="Background" Value="#22364A"/>
+          <Setter Property="BorderBrush" Value="#3F8D94"/>
+        </Trigger>
+      </Style.Triggers>
+    </Style>
+    <Style x:Key="PinStyle" TargetType="ToggleButton">
+      <Setter Property="Foreground" Value="#B4C1D1"/>
+      <Setter Property="Background" Value="#1B2533"/>
+      <Setter Property="BorderBrush" Value="#334156"/>
+      <Setter Property="Padding" Value="14,8"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ToggleButton">
+            <Border x:Name="PinSurface" Background="{TemplateBinding Background}"
+                    BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="1" CornerRadius="7"
+                    Padding="{TemplateBinding Padding}">
+              <ContentPresenter HorizontalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="PinSurface" Property="Background" Value="#29384B"/>
+              </Trigger>
+              <Trigger Property="IsChecked" Value="True">
+                <Setter TargetName="PinSurface" Property="Background" Value="#1B3B3C"/>
+                <Setter TargetName="PinSurface" Property="BorderBrush" Value="#58B7A6"/>
+                <Setter Property="Foreground" Value="#86E3D1"/>
+              </Trigger>
+              <Trigger Property="IsKeyboardFocused" Value="True">
+                <Setter TargetName="PinSurface" Property="BorderBrush" Value="#86E3D1"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style x:Key="ReadButtonStyle" TargetType="Button">
+      <Setter Property="Background" Value="#223245"/>
+      <Setter Property="Foreground" Value="#D0DFEC"/>
+      <Setter Property="Padding" Value="9,5"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="ReadSurface" Background="{TemplateBinding Background}"
+                    Padding="{TemplateBinding Padding}" CornerRadius="5" BorderThickness="1"
+                    BorderBrush="Transparent">
+              <ContentPresenter VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="ReadSurface" Property="Background" Value="#31465E"/>
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False">
+                <Setter TargetName="ReadSurface" Property="Background" Value="Transparent"/>
+                <Setter Property="Foreground" Value="#77899F"/>
+              </Trigger>
+              <Trigger Property="IsKeyboardFocused" Value="True">
+                <Setter TargetName="ReadSurface" Property="BorderBrush" Value="#86E3D1"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+  </Window.Resources>
+  <Grid x:Name="RootLayout" Margin="24,20,24,16">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="*"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
+    </Grid.RowDefinitions>
+    <Grid x:Name="HeaderLayout" Margin="0,0,0,22">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="Auto"/>
+        <ColumnDefinition Width="*"/>
+        <ColumnDefinition Width="Auto"/>
+      </Grid.ColumnDefinitions>
+      <Border x:Name="BrandIcon" Width="42" Height="42" Margin="0,0,14,0">
+        <Image x:Name="AppLogo" Stretch="Uniform"/>
+      </Border>
+      <StackPanel Grid.Column="1">
+        <TextBlock x:Name="Heading" Text="Sessions" FontSize="25" FontWeight="SemiBold"/>
+        <TextBlock Text="Your agents, across Windows and WSL" Foreground="{StaticResource Muted}" Margin="0,3,0,0"
+                   Visibility="{DynamicResource DetailVisibility}"/>
+      </StackPanel>
+      <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+      <ToggleButton x:Name="Compact" Style="{StaticResource PinStyle}" Margin="0,0,8,0"
+                    Content="Compact" ToolTip="Switch between compact and comfortable layouts"
+                    AutomationProperties.Name="Compact layout"/>
+      <ToggleButton x:Name="Pin" Style="{StaticResource PinStyle}"
+                    VerticalAlignment="Center" ToolTip="Keep this window above other apps"
+                    AutomationProperties.Name="Always on top" Content="Always on top"/>
+      </StackPanel>
+    </Grid>
+    <Grid x:Name="SummaryCards" Grid.Row="1" Margin="0,0,0,18" Visibility="{DynamicResource DetailVisibility}">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="*"/><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/>
+      </Grid.ColumnDefinitions>
+      <Border Background="#17283B" CornerRadius="9" Padding="16,12" Margin="0,0,8,0">
+        <StackPanel Orientation="Horizontal">
+          <TextBlock x:Name="BusyCount" Text="0" FontSize="24" FontWeight="SemiBold" Foreground="#8EC5FF"/>
+          <TextBlock Text="In progress" Foreground="#A7BED7" VerticalAlignment="Center" Margin="12,0,0,0"/>
+        </StackPanel>
+      </Border>
+      <Border Grid.Column="1" Background="#30291E" CornerRadius="9" Padding="16,12" Margin="4,0,4,0">
+        <StackPanel Orientation="Horizontal">
+          <TextBlock x:Name="AttentionCount" Text="0" FontSize="24" FontWeight="SemiBold" Foreground="#F3CF87"/>
+          <TextBlock Text="Needs input" Foreground="#CBB999" VerticalAlignment="Center" Margin="12,0,0,0"/>
+        </StackPanel>
+      </Border>
+      <Border Grid.Column="2" Background="#1A302D" CornerRadius="9" Padding="16,12" Margin="8,0,0,0">
+        <StackPanel Orientation="Horizontal">
+          <TextBlock x:Name="DoneCount" Text="0" FontSize="24" FontWeight="SemiBold" Foreground="#8CDBC0"/>
+          <TextBlock Text="Done" Foreground="#A6C6BA" VerticalAlignment="Center" Margin="12,0,0,0"/>
+        </StackPanel>
+      </Border>
+    </Grid>
+    <Border Grid.Row="2" CornerRadius="10" BorderBrush="#2A3545" BorderThickness="1"
+            Background="#161D28" ClipToBounds="True">
+      <Grid>
+        <DataGrid x:Name="Sessions" Background="Transparent" BorderThickness="0"
+                  AutoGenerateColumns="False" CanUserAddRows="False" CanUserDeleteRows="False"
+                  CanUserReorderColumns="False" CanUserSortColumns="True" IsReadOnly="True"
+                  SelectionMode="Single" SelectionUnit="FullRow" HeadersVisibility="Column"
+                  GridLinesVisibility="None" RowHeaderWidth="0" HorizontalScrollBarVisibility="Auto"
+                  VerticalScrollBarVisibility="Auto" EnableRowVirtualization="True">
+          <DataGrid.Columns>
+            <DataGridTemplateColumn Header="SESSION" SortMemberPath="Title" CanUserSort="True" Width="*" MinWidth="170">
+              <DataGridTemplateColumn.CellTemplate>
+                <DataTemplate>
+                  <StackPanel ToolTip="{Binding Cwd}">
+                    <TextBlock Text="{Binding Title}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                    <TextBlock Text="{Binding Cwd}" FontSize="11" Foreground="{StaticResource Muted}"
+                               Visibility="{DynamicResource DetailVisibility}"
+                               Margin="0,5,0,0" TextTrimming="CharacterEllipsis"/>
+                  </StackPanel>
+                </DataTemplate>
+              </DataGridTemplateColumn.CellTemplate>
+            </DataGridTemplateColumn>
+            <DataGridTemplateColumn Header="ENVIRONMENT" SortMemberPath="Source" CanUserSort="True" Width="155">
+              <DataGridTemplateColumn.CellTemplate>
+                <DataTemplate>
+                  <StackPanel Orientation="Horizontal" ToolTip="{Binding Source}">
+                    <Path Width="12" Height="10" Margin="0,0,8,0" VerticalAlignment="Center"
+                          Stroke="#8DADC8" StrokeThickness="0.9" Stretch="Uniform">
+                      <Path.Style>
+                        <Style TargetType="Path">
+                          <Setter Property="Data" Value="M0,0 H12 V10 H0 Z M3,3 L5,5 L3,7 M7,7 H9"/>
+                          <Style.Triggers>
+                            <DataTrigger Binding="{Binding Source}" Value="Windows">
+                              <Setter Property="Data" Value="M0,0 H5 V4 H0 Z M7,0 H12 V4 H7 Z M0,6 H5 V10 H0 Z M7,6 H12 V10 H7 Z"/>
+                              <Setter Property="Fill" Value="#8DADC8"/>
+                            </DataTrigger>
+                          </Style.Triggers>
+                        </Style>
+                      </Path.Style>
+                    </Path>
+                    <TextBlock Text="{Binding Source}" Foreground="#B6C7DC" TextTrimming="CharacterEllipsis"
+                               MaxWidth="100"/>
+                  </StackPanel>
+                </DataTemplate>
+              </DataGridTemplateColumn.CellTemplate>
+            </DataGridTemplateColumn>
+            <DataGridTemplateColumn Header="STATUS" SortMemberPath="StatusRank" CanUserSort="True" Width="156">
+              <DataGridTemplateColumn.CellTemplate>
+                <DataTemplate>
+                  <Border Background="{Binding StatusBackground}" CornerRadius="12"
+                          Padding="10,5" HorizontalAlignment="Left">
+                    <StackPanel Orientation="Horizontal">
+                      <Ellipse Width="5" Height="5" Fill="{Binding StatusForeground}" Margin="0,0,7,0"
+                               VerticalAlignment="Center"/>
+                      <TextBlock Text="{Binding StatusLabel}" Foreground="{Binding StatusForeground}" FontSize="11"
+                                 FontWeight="SemiBold"/>
+                    </StackPanel>
+                  </Border>
+                </DataTemplate>
+              </DataGridTemplateColumn.CellTemplate>
+            </DataGridTemplateColumn>
+            <DataGridTextColumn Header="ID" SortMemberPath="Id" Binding="{Binding ShortId}" Width="106">
+              <DataGridTextColumn.ElementStyle>
+                <Style TargetType="TextBlock">
+                  <Setter Property="FontFamily" Value="Cascadia Mono, Consolas"/>
+                  <Setter Property="FontSize" Value="11"/>
+                  <Setter Property="Foreground" Value="#91A0B5"/>
+                  <Setter Property="ToolTip" Value="{Binding Id}"/>
+                </Style>
+              </DataGridTextColumn.ElementStyle>
+            </DataGridTextColumn>
+          </DataGrid.Columns>
+        </DataGrid>
+        <StackPanel x:Name="EmptyState" VerticalAlignment="Center" HorizontalAlignment="Center"
+                    IsHitTestVisible="False" Margin="12,40,12,0">
+          <TextBlock Text="&#xE9CE;" FontFamily="Segoe MDL2 Assets" Foreground="#51657E" FontSize="30"
+                     HorizontalAlignment="Center" Margin="0,0,0,12"/>
+          <TextBlock x:Name="EmptyTitle" Text="Connecting to your agents" FontSize="15" FontWeight="SemiBold"
+                     HorizontalAlignment="Center"/>
+          <TextBlock Text="Open Copilot sessions will appear here." Foreground="{StaticResource Muted}" Margin="0,7,0,0"/>
+        </StackPanel>
+      </Grid>
+    </Border>
+    <Grid Grid.Row="3" Margin="2,10,2,0">
+      <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+      <TextBlock x:Name="Detail" Text="Click a column to sort" Foreground="{StaticResource Muted}" FontSize="11"
+                 TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
+      <Button x:Name="MarkAllRead" Grid.Column="1" Content="Mark all read" Style="{StaticResource ReadButtonStyle}"
+              Margin="8,0,0,0" ToolTip="Clear all unread completion badges"/>
+      <StackPanel Grid.Column="2" Orientation="Horizontal" Margin="12,0,0,0" VerticalAlignment="Center">
+        <Ellipse x:Name="LiveDot" Width="6" Height="6" Fill="#72C9AF" Margin="0,0,7,0" VerticalAlignment="Center"/>
+        <TextBlock x:Name="Connection" Text="Connecting" Foreground="{StaticResource Muted}" FontSize="11"/>
+      </StackPanel>
+    </Grid>
+    <Border x:Name="ErrorPanel" Grid.Row="4" Background="#33252B" CornerRadius="7"
+            Padding="12,9" Margin="0,12,0,0" Visibility="Collapsed">
+      <TextBlock x:Name="ErrorText" Foreground="#ECB4B9" TextWrapping="Wrap" MaxHeight="64"
+                 TextTrimming="CharacterEllipsis" FontSize="11"/>
+    </Border>
+  </Grid>
+</Window>

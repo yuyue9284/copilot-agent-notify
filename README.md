@@ -42,6 +42,140 @@ copilot plugin install yuyue9284/copilot-agent-notify
 Restart Copilot CLI after installation. Use `copilot plugin list` or
 `/plugin list` to confirm that `personal-agent-notify` is enabled.
 
+## Desktop session gadget (Windows + WSL)
+
+Run `scripts\gadget.cmd` from Windows Explorer, or use Windows Python directly:
+
+```powershell
+python scripts/session_gadget.py
+```
+
+To install a **Copilot Sessions** desktop shortcut and a self-contained script
+copy under `%LOCALAPPDATA%\CopilotAgentNotify\gadget`, run:
+
+```powershell
+.\windows-helper\install-gadget.ps1
+```
+
+This does not enable automatic startup. Re-run it after updating the repository
+to update the installed gadget. Close an open gadget before updating it. To
+uninstall, remove that gadget directory and the desktop shortcut. If your
+PowerShell policy prevents running the installer, use `gadget.cmd` instead;
+do not change the execution policy.
+
+For a window without an accompanying console, use `pythonw` instead of `python`.
+You can also create a shortcut targeting `pythonw.exe` with the full path to
+`scripts\session_gadget.py` as its argument. Keep the scripts and
+`windows-helper\gadget` sources together, or use the installer to copy them.
+
+The native C#/WPF window uses a consistent dark theme, status badges, summary
+cards, and directory subtitles. It has an **Always on top** toggle and combines native
+Windows sessions with sessions in running WSL distributions. Each row shows its
+environment, title, short session ID, and status; selecting it shows the full ID,
+owner PID, and working directory.
+
+The custom terminal/checkmark icon is used for the app, taskbar, and installed
+desktop shortcut. Its multi-resolution assets are generated locally by
+`windows-helper/gadget/generate_icon.py`, without downloading third-party artwork.
+
+Click **Session**, **Environment**, **Status**, or **ID** to sort; click the same
+header again to reverse direction. The arrow shows the current direction, and
+both the chosen sort and selection survive live updates. Status sorts by attention,
+working, loading, unknown, then done, rather than alphabetically.
+
+### Layouts and unread completions
+
+Use **Compact** in the header to switch layouts:
+
+- **Comfortable** (default): summary cards, directory subtitles, and all four
+  columns, initially 900 x 530.
+- **Compact**: initially 480 x 300, resizable down to 420 x 230, shorter rows,
+  no summary cards or directory subtitles, and no ID column. Session, Environment,
+  and Status remain sortable; select a row to see its directory and full ID in
+  the footer tooltip. **Pin** is the same always-on-top toggle.
+
+Dimensions are WPF logical pixels and scale with Windows display settings.
+The layout choice is saved in `%LOCALAPPDATA%\CopilotAgentNotify\gadget-ui.json`
+and restored at the next launch. Switching layouts does not reset sorting or
+unread state; custom window size and sort order are not persisted across launches.
+
+When an observed working/waiting session becomes **Done**, it gets a **Done · New**
+label and adds one to the taskbar unread-completion overlay. Multiple completions
+are counted by session, not by message. The overlay shows up to `99+`; the
+**Mark all read** button and taskbar description show the full count.
+
+Select a session to mark it read, click an already-selected row, or press Enter
+or Space on it. **Mark all read** clears all counts. Merely bringing the window
+to the foreground or refreshing/sorting does not mark completions read.
+If a session resumes work or closes, its old completion badge is removed.
+Transient `Loading`/`Unknown` states do not create completion alerts.
+
+Unread state is tracked only while this gadget instance is open, not persisted:
+sessions already done when it opens are not retroactively counted. A turn that
+starts and finishes entirely between polls may not be observed. Windows controls
+taskbar overlay visibility (including small-icon and taskbar grouping settings);
+the unread indicator and count remain available inside the gadget.
+
+### Choose WSL distributions
+
+Create or edit `%LOCALAPPDATA%\CopilotAgentNotify\gadget.json` on Windows:
+
+```json
+{
+  "wsl_distros": ["Ubuntu"]
+}
+```
+
+This monitors only the running `Ubuntu` distribution, while native Windows
+monitoring stays enabled. Names are case-insensitive; stopped distributions are
+not started. Use `[]` to disable WSL monitoring, or `null` to monitor all running
+distributions (also the default when the file or setting is absent).
+Invalid configuration is reported rather than silently monitoring everything.
+Restart the gadget after editing this file. The installer preserves this config.
+
+| Status | Meaning |
+| --- | --- |
+| In progress | The root or one of its background children is working |
+| Needs input | A permission or input request is waiting |
+| Done | No tracked work remains; the Copilot process is still open |
+| Loading | The initial transcript replay has not caught up yet |
+| Unknown | A transcript or collector could not be read reliably |
+
+Sessions disappear after their process closes. `Done` means the turn is idle,
+not that its code or commands succeeded. Long-running work is never marked done
+because of a timeout. Unresponsive collectors show `Unknown` and an error instead.
+Normal status refresh is about two seconds; WSL distribution discovery is every
+ten seconds. Large transcripts can take several refreshes to load initially.
+
+Requirements and scope:
+
+- Windows Python 3.9+, .NET Framework 4.8 with its C# compiler and WPF assemblies,
+  and `python3` 3.9+ in each running WSL distro. Tkinter is no longer required.
+  No third-party Python packages, .NET SDK download, or browser runtime is needed.
+  First launch compiles the C#/XAML window using the local framework compiler into
+  `%LOCALAPPDATA%\CopilotAgentNotify\gadget-build`. Later launches reuse a
+  source-hashed build; changing the UI sources creates a new build automatically.
+  This cache can also be removed when uninstalling.
+- Discovery covers the signed-in Windows user's `~/.copilot` and each running
+  distro's **default user's** `~/.copilot`. `COPILOT_HOME`, when set in the
+  collector's environment, overrides the home for that OS. Shell-profile-only
+  variables are not loaded by the WSL collector. Other OS users and custom homes
+  not configured in that environment are outside the discovery scope.
+- Zellij and the notification hooks are not required. Live `inuse.PID.lock`
+  files identify owners; process start times reject locks from recycled PIDs.
+  Resumed-session locks are deduplicated per process; child work is included in
+  its root row rather than listed as another desktop session.
+- The Python backend sends metadata snapshots to the native window through an
+  anonymous pipe and sends its read-only collector code over a local WSL pipe.
+  Nothing needs installing into the distro, and stopped distros are not
+  intentionally started. Closing the window stops its collectors.
+- The gadget does not modify transcripts, terminal titles, or notification
+  settings. No HTTP server, network service, telemetry, prompt content, or tool
+  output is exposed. Session titles and directory paths are visible on screen.
+
+For native-only JSON diagnostics, run `python scripts/session_gadget.py --snapshot`.
+This reads one batch, so large transcripts may report `Loading`.
+
 ## Secret-scanning Git hooks
 
 This repository includes Gitleaks hooks in `.githooks/`:
