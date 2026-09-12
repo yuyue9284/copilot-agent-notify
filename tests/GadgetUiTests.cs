@@ -127,6 +127,121 @@ public static class GadgetUiTests
         Check(SessionWindow.CreateBadge(100) != null, "99+ badge failed");
     }
 
+    private static void TestSharedProcess(SessionWindow app)
+    {
+        app.Apply(new Snapshot { rows = new SessionData[0], errors = new string[0] });
+        Snapshot sessions = Sample();
+        foreach (SessionData row in sessions.rows) row.pid = 4242;
+        app.Apply(sessions);
+        Check(app.Rows.Count == 3, "Sessions sharing a PID were merged");
+        SessionRow waiting = app.Rows.Single(row => row.Status == "Needs input");
+        app.Grid.SelectedItem = waiting;
+        sessions = Sample();
+        foreach (SessionData row in sessions.rows) row.pid = 4242;
+        sessions.rows[0].status = "Done";
+        app.Apply(sessions);
+        Check(app.UnreadCount == 1, "Completion should count only its session, not its process");
+        Check(waiting.Status == "Needs input" && !waiting.Unread, "Sibling status was overwritten");
+        Check(Object.ReferenceEquals(app.Grid.SelectedItem, waiting), "Sibling selection was lost");
+        sessions = Sample();
+        foreach (SessionData row in sessions.rows) row.pid = 4242;
+        sessions.rows[0].status = "Done";
+        sessions.rows[1].status = "Done";
+        app.Apply(sessions);
+        Check(app.UnreadCount == 2, "Same-PID completions must be counted independently");
+        app.MarkSelectedRead();
+        Check(app.UnreadCount == 1, "Reading one session cleared its sibling badge");
+        app.Apply(new Snapshot { rows = new[] { sessions.rows[0], sessions.rows[2] }, errors = new string[0] });
+        Check(app.Rows.Count == 2 && app.UnreadCount == 1, "Closing a sibling changed other session state");
+        app.Apply(new Snapshot { rows = new SessionData[0], errors = new string[0] });
+    }
+
+    private static Snapshot ForgetSample(string revision, string status = "Done")
+    {
+        Snapshot sample = Sample();
+        sample.rows[0].activity_revision = revision;
+        sample.rows[0].status = status;
+        sample.rows[1].pid = sample.rows[0].pid;
+        return sample;
+    }
+
+    private static void TestForget(SessionWindow app, string preferences)
+    {
+        const string first = "00000000000000000100/first";
+        const string newer = "00000000000000000101/second";
+        app.Apply(new Snapshot { rows = new SessionData[0], errors = new string[0] });
+        app.Apply(ForgetSample(first, "In progress"));
+        app.Grid.SelectedItem = app.Rows.Single(row => row.Id.StartsWith("9d24"));
+        app.Apply(ForgetSample(first));
+        Check(app.UnreadCount == 1, "Forget fixture requires an unread completion");
+        var button = (Button)app.Window.FindName("Forget");
+        Check(button.IsEnabled, "Forget not enabled for a ready selected session");
+        ((IInvokeProvider)UIElementAutomationPeer.CreatePeerForElement(button).GetPattern(PatternInterface.Invoke)).Invoke();
+        Pump();
+        Check(app.Rows.Count == 2 && app.UnreadCount == 0, "Forget did not hide row and clear badge");
+        Check(app.Rows.Any(row => row.Status == "Needs input"), "Forget affected a same-PID sibling");
+        app.Apply(ForgetSample(first));
+        Check(app.Rows.Count == 2, "Unchanged activity resurfaced forgotten session");
+        app.Apply(ForgetSample("00000000000000000099/older", "Loading"));
+        Check(app.Rows.Count == 2, "Partial replay resurfaced forgotten session");
+        app.Apply(ForgetSample(newer, "Unknown"));
+        Check(app.Rows.Count == 2, "Unreliable status resurfaced forgotten session");
+        app.Apply(ForgetSample("00000000000000000099/older"));
+        Check(app.Rows.Count == 2, "Older rewritten history resurfaced forgotten session");
+        app.Apply(new Snapshot { rows = new SessionData[0], errors = new string[0] });
+        app.Apply(ForgetSample(first));
+        Check(app.Rows.Count == 2, "Reconnecting alone resurfaced forgotten session");
+        var restored = new SessionWindow(preferences);
+        try
+        {
+            restored.Apply(ForgetSample(first));
+            Check(restored.Rows.Count == 2, "Forget did not survive restart");
+            restored.Apply(ForgetSample(newer));
+            Check(restored.Rows.Count == 3 && restored.UnreadCount == 1,
+                  "New completed activity did not resurface with an unread badge");
+        }
+        finally { restored.Window.Close(); }
+        app.Apply(ForgetSample(newer, "In progress"));
+        Check(app.Rows.Count == 3 && app.UnreadCount == 0, "New work did not resurface independently");
+        app.Grid.SelectedItem = app.Rows.Single(row => row.Id.StartsWith("9d24"));
+        app.ForgetSelected();
+        Check(app.Rows.Count == 2, "Could not forget an in-progress session locally");
+        app.Apply(ForgetSample("00000000000000000102/input", "Needs input"));
+        Check(app.Rows.Count == 3, "New input request did not resurface");
+        app.Grid.SelectedItem = app.Rows.Single(row => row.Id.StartsWith("9d24"));
+        app.Apply(ForgetSample(null, "Loading"));
+        Check(!button.IsEnabled, "Forget allowed incomplete history to establish a bad baseline");
+        app.Apply(ForgetSample(""));
+        app.ForgetSelected();
+        Check(app.Rows.Count == 2, "Metadata-only ghost cannot be forgotten");
+        app.Apply(ForgetSample(""));
+        Check(app.Rows.Count == 2, "Metadata-only ghost resurfaced without activity");
+        app.Apply(ForgetSample(newer, "In progress"));
+        Check(app.Rows.Count == 3, "First conversation activity did not resurface ghost");
+
+        string directory = Path.Combine(Path.GetDirectoryName(preferences), "failure-case");
+        Directory.CreateDirectory(directory);
+        string blocked = Path.Combine(directory, "gadget-forgotten.json");
+        Directory.CreateDirectory(blocked);
+        var failure = new SessionWindow(Path.Combine(directory, "gadget-ui.json"));
+        try
+        {
+            failure.Apply(ForgetSample(first));
+            failure.Grid.SelectedItem = failure.Rows.First(row => row.ActivityRevision != null);
+            failure.ForgetSelected();
+            Check(failure.Rows.Count == 3, "Failed persistence falsely hid the session");
+            Check(((TextBlock)failure.Window.FindName("ErrorText")).Text.Contains("Cannot save forgotten"),
+                  "Forget persistence failure not surfaced");
+        }
+        finally
+        {
+            failure.Window.Close();
+            Directory.Delete(blocked);
+            Directory.Delete(directory);
+        }
+        app.Apply(new Snapshot { rows = new SessionData[0], errors = new string[0] });
+    }
+
     [STAThread]
     public static int Main()
     {
@@ -184,6 +299,8 @@ public static class GadgetUiTests
             app.Sort(app.Grid.Columns[2], ListSortDirection.Ascending);
             Pump();
             TestUnread(app);
+            TestSharedProcess(app);
+            TestForget(app, preferences);
             app.Apply(Sample());
             string screenshot = Environment.GetEnvironmentVariable("COPILOT_GADGET_SCREENSHOT");
             if (!String.IsNullOrEmpty(screenshot)) Screenshot(app, screenshot);
@@ -195,6 +312,7 @@ public static class GadgetUiTests
             compact.IsChecked = true;
             Pump();
             Check(app.IsCompact && app.Window.Width == 480 && app.Window.Height == 300, "Compact dimensions incorrect");
+            Check(((FrameworkElement)app.Window.FindName("Forget")).IsVisible, "Forget missing from compact layout");
             Check(((FrameworkElement)app.Window.FindName("SummaryCards")).Visibility == Visibility.Collapsed,
                   "Compact layout should hide summary cards");
             Check(app.Grid.Columns[3].Visibility == Visibility.Collapsed, "Compact layout should hide ID column");
@@ -227,6 +345,7 @@ public static class GadgetUiTests
             app.Window.Close();
             application.Shutdown();
             File.Delete(preferences);
+            File.Delete(Path.Combine(directory, "gadget-forgotten.json"));
             Directory.Delete(directory);
         }
     }

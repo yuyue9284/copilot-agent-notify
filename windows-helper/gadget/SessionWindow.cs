@@ -30,6 +30,7 @@ namespace CopilotSessions
         public string source { get; set; }
         public string cwd { get; set; }
         public string status { get; set; }
+        public string activity_revision { get; set; }
         public int pid { get; set; }
     }
 
@@ -45,10 +46,11 @@ namespace CopilotSessions
         private SessionData data;
         private bool working;
         public bool Unread { get; private set; }
-        public SessionRow(SessionData value)
+        public SessionRow(SessionData value, bool resurfaced = false)
         {
             data = value;
             working = value.status == "In progress" || value.status == "Needs input";
+            Unread = resurfaced && value.status == "Done";
         }
         public string Key { get { return Source + "/" + Id; } }
         public string Id { get { return data.id; } }
@@ -57,6 +59,8 @@ namespace CopilotSessions
         public string Source { get { return data.source; } }
         public string Cwd { get { return data.cwd; } }
         public string Status { get { return data.status; } }
+        public string ActivityRevision { get { return data.activity_revision; } }
+        public bool CanForget { get { return ActivityRevision != null && Status != "Loading" && Status != "Unknown"; } }
         public string StatusLabel { get { return Status == "Done" && Unread ? "Done \u00B7 New" : Status; } }
         public int Pid { get { return data.pid; } }
         public int StatusRank
@@ -124,6 +128,10 @@ namespace CopilotSessions
         private volatile bool closed;
         private bool applying;
         private readonly string preferencesPath;
+        private readonly string forgottenPath;
+        private Dictionary<string, string> forgotten = new Dictionary<string, string>();
+        private Snapshot latestSnapshot;
+        private string forgottenError;
         private double comfortableWidth = 900, comfortableHeight = 530;
         private string settingsError;
         public bool IsCompact { get; private set; }
@@ -137,6 +145,8 @@ namespace CopilotSessions
             preferencesPath = settingsPath ?? Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                 "CopilotAgentNotify", "gadget-ui.json");
+            forgottenPath = Path.Combine(Path.GetDirectoryName(preferencesPath), "gadget-forgotten.json");
+            LoadForgotten();
             using (Stream stream = Assembly.GetExecutingAssembly().GetManifestResourceStream("SessionWindow.xaml"))
                 Window = (Window)XamlReader.Load(stream);
             using (Stream stream = Assembly.GetExecutingAssembly().GetManifestResourceStream("sessions.png"))
@@ -177,6 +187,7 @@ namespace CopilotSessions
                 if (e.Key == Key.Enter || e.Key == Key.Space) MarkSelectedRead();
             };
             ((Button)Window.FindName("MarkAllRead")).Click += delegate { MarkAllRead(); };
+            ((Button)Window.FindName("Forget")).Click += delegate { ForgetSelected(); };
             ToggleButton pin = (ToggleButton)Window.FindName("Pin");
             pin.Checked += delegate { Window.Topmost = true; };
             pin.Unchecked += delegate { Window.Topmost = false; };
@@ -209,6 +220,69 @@ namespace CopilotSessions
             catch (ArgumentException error) { settingsError = "Invalid layout preference: " + error.Message; }
             catch (InvalidOperationException error) { settingsError = "Invalid layout preference: " + error.Message; }
             return false;
+        }
+
+        private void LoadForgotten()
+        {
+            try
+            {
+                if (!File.Exists(forgottenPath)) return;
+                var entries = new JavaScriptSerializer().Deserialize<Dictionary<string, string>>(
+                    File.ReadAllText(forgottenPath));
+                if (entries == null || entries.Any(entry => String.IsNullOrEmpty(entry.Key) || entry.Value == null))
+                    throw new ArgumentException("Expected session identities mapped to activity revisions.");
+                forgotten = entries;
+            }
+            catch (IOException error) { forgottenError = "Cannot load forgotten sessions: " + error.Message; }
+            catch (UnauthorizedAccessException error) { forgottenError = "Cannot load forgotten sessions: " + error.Message; }
+            catch (ArgumentException error) { forgottenError = "Invalid forgotten sessions: " + error.Message; }
+            catch (InvalidOperationException error) { forgottenError = "Invalid forgotten sessions: " + error.Message; }
+        }
+
+        private bool SaveForgotten(Dictionary<string, string> entries)
+        {
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(forgottenPath));
+                string scratch = forgottenPath + "." + Guid.NewGuid().ToString("N");
+                try
+                {
+                    File.WriteAllText(scratch, new JavaScriptSerializer().Serialize(entries));
+                    if (File.Exists(forgottenPath)) File.Replace(scratch, forgottenPath, null);
+                    else File.Move(scratch, forgottenPath);
+                }
+                finally { if (File.Exists(scratch)) File.Delete(scratch); }
+                forgottenError = null;
+                return true;
+            }
+            catch (IOException error) { forgottenError = "Cannot save forgotten sessions: " + error.Message; }
+            catch (UnauthorizedAccessException error) { forgottenError = "Cannot save forgotten sessions: " + error.Message; }
+            return false;
+        }
+
+        public void ForgetSelected()
+        {
+            var row = Grid.SelectedItem as SessionRow;
+            if (row == null || !row.CanForget || latestSnapshot == null) return;
+            var updated = new Dictionary<string, string>(forgotten);
+            updated[row.Key] = row.ActivityRevision;
+            if (!SaveForgotten(updated))
+            {
+                SetErrors(latestSnapshot.errors);
+                return;
+            }
+            forgotten = updated;
+            row.MarkRead();
+            Apply(latestSnapshot);
+        }
+
+        private static bool NewActivity(string current, string dismissed)
+        {
+            if (String.IsNullOrEmpty(current) || current == dismissed) return false;
+            if (String.IsNullOrEmpty(dismissed)) return true;
+            if (current.Length > 20 && dismissed.Length > 20 && current[20] == '/' && dismissed[20] == '/')
+                return String.CompareOrdinal(current.Substring(0, 20), dismissed.Substring(0, 20)) >= 0;
+            return true;
         }
 
         public void SetCompact(bool compact, bool save = true)
@@ -323,7 +397,30 @@ namespace CopilotSessions
                     || !new[] { "In progress", "Needs input", "Done", "Loading", "Unknown" }.Contains(row.status))
                     throw new ArgumentException("Invalid collector session.");
             lastUpdate = DateTime.UtcNow;
-            var incoming = snapshot.rows.ToDictionary(row => row.source + "/" + row.id);
+            latestSnapshot = snapshot;
+            var incoming = new Dictionary<string, SessionData>();
+            var resurfaced = new List<string>();
+            foreach (SessionData row in snapshot.rows)
+            {
+                string key = row.source + "/" + row.id;
+                string revision;
+                if (forgotten.TryGetValue(key, out revision))
+                {
+                    // Loading replays old history. Only a complete, healthy
+                    // snapshot with new conversation activity can undo Forget.
+                    if (row.status == "Loading" || row.status == "Unknown"
+                        || !NewActivity(row.activity_revision, revision))
+                        continue;
+                    resurfaced.Add(key);
+                }
+                incoming.Add(key, row);
+            }
+            if (resurfaced.Count > 0)
+            {
+                var updated = new Dictionary<string, string>(forgotten);
+                foreach (string key in resurfaced) updated.Remove(key);
+                if (SaveForgotten(updated)) forgotten = updated;
+            }
             var existing = Rows.ToDictionary(row => row.Key);
             SessionRow selected = Grid.SelectedItem as SessionRow;
             applying = true;
@@ -335,7 +432,7 @@ namespace CopilotSessions
             {
                 SessionRow row;
                 if (existing.TryGetValue(item.Key, out row)) row.Update(item.Value);
-                else Rows.Add(new SessionRow(item.Value));
+                else Rows.Add(new SessionRow(item.Value, resurfaced.Contains(item.Key)));
             }
             // Property updates can change a sort key without changing collection membership.
             view.Refresh();
@@ -348,7 +445,8 @@ namespace CopilotSessions
             Text("DoneCount", Rows.Count(row => row.Status == "Done").ToString());
             Element("EmptyState").Visibility = Rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             Text("EmptyTitle", snapshot.discovering ? "Connecting to your agents" :
-                 snapshot.errors.Length > 0 ? "Session discovery unavailable" : "All quiet. No open sessions.");
+                 snapshot.errors.Length > 0 ? "Session discovery unavailable" :
+                 forgotten.Count > 0 ? "All quiet. Forgotten sessions are hidden." : "All quiet. No open sessions.");
             SetErrors(snapshot.errors);
             Text("Connection", snapshot.discovering ? "Connecting" :
                  snapshot.errors.Length > 0 ? "Check connection" : "Live \u00B7 " + Rows.Count + " sessions");
@@ -364,10 +462,15 @@ namespace CopilotSessions
                 row.Id + "  \u00B7  PID " + row.Pid + "  \u00B7  " + row.Cwd;
             Text("Detail", detail);
             Element("Detail").ToolTip = detail;
+            ((Button)Window.FindName("Forget")).IsEnabled = row != null && row.CanForget;
+            Element("Forget").ToolTip = row != null && !row.CanForget
+                ? "Wait for a complete session activity snapshot before forgetting."
+                : "Hide this session and clear its badge until new conversation activity. Copilot keeps running.";
         }
         private void SetErrors(string[] errors)
         {
             if (settingsError != null) errors = errors.Concat(new[] { settingsError }).ToArray();
+            if (forgottenError != null) errors = errors.Concat(new[] { forgottenError }).ToArray();
             Text("ErrorText", String.Join("\n", errors.Take(3)));
             Element("ErrorText").ToolTip = String.Join("\n", errors);
             Element("ErrorPanel").Visibility = errors.Length == 0 ? Visibility.Collapsed : Visibility.Visible;

@@ -76,13 +76,60 @@ class ScannerTests(unittest.TestCase):
         os.utime(directory / "inuse.42.lock", (1, 1))
         self.assertEqual(self.scanner.snapshot()["sessions"], [])
 
-    def test_newest_root_wins_after_resume_and_empty_launch_is_ignored(self):
+    def test_same_process_keeps_all_root_sessions_and_ignores_empty_launch(self):
         old = self.session("old")
         os.utime(old / "inuse.42.lock", (time.time() - 20, time.time() - 20))
         self.session("resumed")
         empty = self.session("empty")
         (empty / "events.jsonl").unlink()
-        self.assertEqual([row["id"] for row in self.scanner.snapshot()["sessions"]], ["resumed"])
+        self.assertEqual({row["id"] for row in self.scanner.snapshot()["sessions"]}, {"old", "resumed"})
+
+    def test_shared_process_tracks_each_status_and_completion_independently(self):
+        working = self.session("working", events=[event("assistant.turn_start")])
+        waiting = self.session("waiting", events=[
+            event("assistant.turn_start"),
+            event("hook.start", hookType="notification", input={
+                "notification_type": "permission_prompt", "sessionId": "waiting"})])
+        self.session("idle")
+
+        def statuses():
+            snapshot = self.scanner.snapshot()
+            self.assertEqual(snapshot["errors"], [])
+            self.assertTrue(all(row["pid"] == 42 for row in snapshot["sessions"]))
+            return {row["id"]: row["status"] for row in snapshot["sessions"]}
+
+        self.assertEqual(statuses(), {"working": "In progress", "waiting": "Needs input", "idle": "Done"})
+        reader = self.scanner.readers[("working", (42, "identity"))][0]
+        self.write(working, [event("assistant.message", phase="final_answer", turnId="1"),
+                             event("assistant.turn_end", turnId="1")], "a")
+        self.write(waiting, [event("assistant.turn_start")], "a")
+        self.assertEqual(statuses(), {"working": "Done", "waiting": "In progress", "idle": "Done"})
+        self.assertIs(reader, self.scanner.readers[("working", (42, "identity"))][0])
+        self.session("new", events=[event("assistant.turn_start")])
+        self.assertEqual(len(statuses()), 4)
+        self.assertIs(reader, self.scanner.readers[("working", (42, "identity"))][0])
+
+    def test_shared_process_session_close_and_lock_removal_do_not_remove_siblings(self):
+        closed = self.session("closed")
+        unlocked = self.session("unlocked")
+        self.session("remaining", events=[event("assistant.turn_start")])
+        self.assertEqual(len(self.scanner.snapshot()["sessions"]), 3)
+        self.write(closed, [event("session.shutdown")], "a")
+        (unlocked / "inuse.42.lock").unlink()
+        self.assertEqual([row["id"] for row in self.scanner.snapshot()["sessions"]], ["remaining"])
+        self.assertNotIn(("unlocked", (42, "identity")), self.scanner.readers)
+        self.write(closed, [event("session.resume"), event("assistant.turn_start")], "a")
+        self.assertEqual({row["id"] for row in self.scanner.snapshot()["sessions"]}, {"closed", "remaining"})
+        with patch.object(probe, "process_token", return_value=None):
+            self.assertEqual(self.scanner.snapshot()["sessions"], [])
+            self.assertEqual(self.scanner.readers, {})
+
+    def test_shared_process_stale_lock_does_not_hide_valid_sessions(self):
+        stale = self.session("stale")
+        os.utime(stale / "inuse.42.lock", (1, 1))
+        self.session("first")
+        self.session("second")
+        self.assertEqual({row["id"] for row in self.scanner.snapshot()["sessions"]}, {"first", "second"})
 
     def test_different_processes_and_multiple_locks_deduplicate(self):
         directory = self.session()
@@ -138,6 +185,72 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(self.status(), "In progress")
         self.write(directory, [event("session.start", sessionId="root")])
         self.assertEqual(self.status(), "Done")
+
+    def test_activity_revision_ignores_bookkeeping_and_survives_replay(self):
+        directory = self.session(events=[event("assistant.turn_start", turnId="1")])
+
+        def revision(scanner=None):
+            return (scanner or self.scanner).snapshot()["sessions"][0]["activity_revision"]
+
+        first = revision()
+        self.assertTrue(first)
+        self.write(directory, [event("assistant.message", phase="final_answer", turnId="1"),
+                               event("assistant.turn_end", turnId="1"),
+                               event("session.model_change"), event("session.resume")], "a")
+        self.assertEqual(revision(), first)
+        self.assertEqual(revision(probe.Scanner(self.home)), first)
+        self.write(directory, [event("assistant.turn_start", turnId="2")], "a")
+        self.assertNotEqual(revision(), first)
+
+    def test_activity_revision_marks_only_requested_activity(self):
+        self.session()
+        tracker = probe.ActivityRevision("root")
+        for kind in ("session.start", "session.resume", "session.info", "model.message"):
+            tracker.event(event(kind))
+            self.assertEqual(tracker.activity_revision, "")
+        activities = [event("user.message"), event("assistant.turn_start"),
+                      event("tool.execution_start"),
+                      event("hook.start", hookType="notification",
+                            input={"notification_type": "permission_prompt"}),
+                      event("hook.start", hookType="notification",
+                            input={"notification_type": "elicitation_dialog"})]
+        for index, item in enumerate(activities):
+            item["id"] = str(index)
+            previous = tracker.activity_revision
+            tracker.event(item)
+            self.assertNotEqual(tracker.activity_revision, previous)
+            previous = tracker.activity_revision
+            tracker.event(event("hook.start", hookType="agentStop"))
+            tracker.event(event("tool.execution_complete"))
+            self.assertEqual(tracker.activity_revision, previous)
+        repeat = event("user.message", content="same prompt")
+        repeat["id"] = "first"
+        tracker.event(repeat)
+        first = tracker.activity_revision
+        repeat["id"] = "second"
+        tracker.event(repeat)
+        self.assertNotEqual(tracker.activity_revision, first)
+
+    def test_activity_revision_is_only_published_after_catchup(self):
+        self.session(events=[event("assistant.turn_start")])
+        with patch.object(probe.Transcript, "poll", return_value=False):
+            row = self.scanner.snapshot()["sessions"][0]
+            self.assertEqual(row["status"], "Loading")
+            self.assertIsNone(row["activity_revision"])
+        self.assertTrue(self.scanner.snapshot()["sessions"][0]["activity_revision"])
+
+    def test_activity_revision_orders_timestamped_events_and_resets_on_replacement(self):
+        newer = event("assistant.turn_start", turnId="new")
+        newer["timestamp"] = "2026-09-12T12:00:00+08:00"
+        directory = self.session(events=[newer])
+        first = self.scanner.snapshot()["sessions"][0]["activity_revision"]
+        older = event("assistant.turn_start", turnId="old")
+        older["timestamp"] = "2026-09-12T03:00:00Z"
+        self.write(directory, [event("session.start", sessionId="root"), older])
+        second = self.scanner.snapshot()["sessions"][0]["activity_revision"]
+        self.assertLess(second[:20], first[:20])
+        self.write(directory, [event("session.start", sessionId="root")])
+        self.assertEqual(self.scanner.snapshot()["sessions"][0]["activity_revision"], "")
 
 
 class SourceTests(unittest.TestCase):

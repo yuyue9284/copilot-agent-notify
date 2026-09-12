@@ -116,6 +116,26 @@ starts and finishes entirely between polls may not be observed. Windows controls
 taskbar overlay visibility (including small-icon and taskbar grouping settings);
 the unread indicator and count remain available inside the gadget.
 
+### Forget retained sessions
+
+Select a row and click **Forget** (available in both layouts) to dismiss it locally
+and clear its unread badge. This does **not** stop Copilot, delete its history,
+or change its actual activity status.
+
+The session stays hidden through polls, gadget restarts, and reconnects until it
+records a new user message, assistant turn start, tool execution start, or
+permission/input request. Model changes, session resume bookkeeping, and completion
+events alone do not undo the dismissal. A resurfacing session shows its real
+status; if new activity has already completed, it receives an unread completion
+badge. Other sessions in the same CLI process are unaffected.
+
+Dismissals are saved in `%LOCALAPPDATA%\CopilotAgentNotify\gadget-forgotten.json`,
+using environment/session identities and fingerprints of activity records, never
+prompt contents. **Forget** is disabled while history is still loading or its
+status is unknown, so an incomplete replay cannot establish an incorrect baseline.
+To restore all dismissed rows manually, close the gadget, remove only this
+dismissal file, and reopen it. Configuration and layout files are separate.
+
 ### Choose WSL distributions
 
 Create or edit `%LOCALAPPDATA%\CopilotAgentNotify\gadget.json` on Windows:
@@ -163,8 +183,11 @@ Requirements and scope:
   not configured in that environment are outside the discovery scope.
 - Zellij and the notification hooks are not required. Live `inuse.PID.lock`
   files identify owners; process start times reject locks from recycled PIDs.
-  Resumed-session locks are deduplicated per process; child work is included in
-  its root row rather than listed as another desktop session.
+  Each live-owned root transcript has its own row, even when several sessions
+  share one CLI process. Multiple owners of the same session are deduplicated
+  by session identity, not PID. Closing one session does not remove its siblings;
+  stale locks, missing transcripts, and explicitly shut-down sessions are excluded.
+  Child work within a root transcript is included in that root's status.
 - The Python backend sends metadata snapshots to the native window through an
   anonymous pipe and sends its read-only collector code over a local WSL pipe.
   Nothing needs installing into the distro, and stopped distros are not

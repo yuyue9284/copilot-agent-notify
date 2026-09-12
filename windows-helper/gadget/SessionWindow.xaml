@@ -279,12 +279,15 @@
       </Grid>
     </Border>
     <Grid Grid.Row="3" Margin="2,10,2,0">
-      <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+      <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
       <TextBlock x:Name="Detail" Text="Click a column to sort" Foreground="{StaticResource Muted}" FontSize="11"
                  TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
-      <Button x:Name="MarkAllRead" Grid.Column="1" Content="Mark all read" Style="{StaticResource ReadButtonStyle}"
+      <Button x:Name="Forget" Grid.Column="1" Content="Forget" Style="{StaticResource ReadButtonStyle}"
+              Margin="8,0,0,0" IsEnabled="False"
+              ToolTip="Hide the selected session until new conversation activity"/>
+      <Button x:Name="MarkAllRead" Grid.Column="2" Content="Mark all read" Style="{StaticResource ReadButtonStyle}"
               Margin="8,0,0,0" ToolTip="Clear all unread completion badges"/>
-      <StackPanel Grid.Column="2" Orientation="Horizontal" Margin="12,0,0,0" VerticalAlignment="Center">
+      <StackPanel Grid.Column="3" Orientation="Horizontal" Margin="12,0,0,0" VerticalAlignment="Center">
         <Ellipse x:Name="LiveDot" Width="6" Height="6" Fill="#72C9AF" Margin="0,0,7,0" VerticalAlignment="Center"/>
         <TextBlock x:Name="Connection" Text="Connecting" Foreground="{StaticResource Muted}" FontSize="11"/>
       </StackPanel>
