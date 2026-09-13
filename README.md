@@ -93,17 +93,35 @@ Windows sessions with sessions in running WSL distributions. Each row shows its
 environment, title, short session ID, and status; selecting it shows the full ID,
 owner PID, and working directory.
 
-In local sessions on Windows 11 build 22621 or later, the window prefers native
-Desktop Acrylic: dark navy surfaces over a system-blurred backdrop, with opaque
-text and controls. Remote sessions deliberately use a predictable **plain
-translucency** fallback, also used when Acrylic is unsupported. This fallback is
-about 90% opaque (230/255), has **no blur**, and uniformly blends the entire window,
-including text and the standard title bar. It does not make the window click-through.
-Standard resizing, title-bar actions, and both layouts are preserved.
+Use the **Appearance** gear in the header (in either layout) to choose:
+
+- **Auto** (default): native Desktop Acrylic in supported local sessions on Windows
+  11 build 22621 or later; plain translucency in remote sessions or when Acrylic is unsupported.
+- **Acrylic**: explicitly request the native material, even remotely. Windows may
+  render it solid; an unsupported API falls back to plain translucency.
+- **Translucent**: plain uniform translucency, with **no blur**.
+- **Solid**: fully opaque dark surfaces.
+
+The **Translucent opacity** slider ranges from **50–100%**, default **90%**
+(native alpha 230/255). It adjusts plain translucency and automatic fallback, not
+Acrylic, and is enabled while Auto or Translucent is selected. **100%** restores
+fully opaque composition while retaining the selected mode. Plain translucency
+blends text and the standard title bar too; Acrylic keeps its foreground content
+opaque. Neither makes the window click-through. Standard resizing, title-bar
+actions, sorting, selection, and unread state are preserved.
+
+The menu supports keyboard navigation: Tab switches to/from the slider, arrow
+keys adjust opacity in integer steps, and Escape closes the menu. Changes apply
+live and save with the compact-layout choice in
+`%LOCALAPPDATA%\CopilotAgentNotify\gadget-ui.json`, for example
+`{"compact":true,"appearance":"auto","opacity":90}`. Existing compact-only files
+default to Auto/90; no manual JSON editing is needed. If saving fails, controls
+revert and the existing error panel reports the failure.
 
 High contrast or disabled Windows **Transparency effects** keeps the window fully
 opaque; unexpected native failures also restore the readable opaque appearance.
-The gadget observes appearance/session changes without changing system settings.
+These system preferences override the selected appearance, without overwriting
+the saved choice. The gadget observes appearance/session changes without changing system settings.
 Windows can suppress Acrylic according to activation, power, and hardware
 conditions: API support alone does not guarantee visible blur, and the remote
 fallback policy is not a claim that Acrylic never works over Remote Desktop.

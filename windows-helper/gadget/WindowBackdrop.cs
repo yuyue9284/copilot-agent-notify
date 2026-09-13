@@ -21,6 +21,7 @@ namespace CopilotSessions
     }
 
     internal enum WindowAppearance { Opaque, Acrylic, Translucent }
+    internal enum AppearancePreference { Auto, Acrylic, Translucent, Solid }
 
     internal sealed class WindowBackdrop : IDisposable
     {
@@ -30,6 +31,9 @@ namespace CopilotSessions
         private volatile bool disposed;
         private bool refreshPending, backdropSet, frameExtended, keepLayered, synchronizingTopmost;
         internal const byte FallbackAlpha = 230;
+        internal AppearancePreference Preference { get; private set; }
+        internal int OpacityPercent { get; private set; }
+        internal byte OpacityAlpha { get { return (byte)Math.Round(OpacityPercent * 255.0 / 100, MidpointRounding.AwayFromZero); } }
         internal WindowAppearance Mode { get; private set; }
         internal bool IsEnabled { get { return Mode == WindowAppearance.Acrylic; } }
 
@@ -37,8 +41,20 @@ namespace CopilotSessions
         {
             this.window = window;
             this.native = native ?? new DwmNative();
+            OpacityPercent = 90;
             window.SourceInitialized += SourceInitialized;
             window.Closed += Closed;
+        }
+
+        internal void Configure(AppearancePreference preference, int opacityPercent)
+        {
+            if (!Enum.IsDefined(typeof(AppearancePreference), preference))
+                throw new ArgumentOutOfRangeException("preference");
+            if (opacityPercent < 50 || opacityPercent > 100)
+                throw new ArgumentOutOfRangeException("opacityPercent");
+            Preference = preference;
+            OpacityPercent = opacityPercent;
+            Refresh(SystemParameters.HighContrast);
         }
 
         private void SourceInitialized(object sender, EventArgs args)
@@ -68,19 +84,12 @@ namespace CopilotSessions
 
         private IntPtr WindowMessage(IntPtr hwnd, int message, IntPtr wParam, IntPtr lParam, ref bool handled)
         {
-            if (message == 0x007C && wParam.ToInt64() == -20)
+            if (keepLayered && message == 0x007C && wParam.ToInt64() == -20)
             {
-                // Rebase a potentially stale style word on the current Pin intent.
-                // Do not call SetWindowPos here: another z-order change can be in flight.
-                int style = Marshal.ReadInt32(lParam, 4);
-                style = window.Topmost ? style | 8 : style & ~8;
-                if (keepLayered)
-                {
-                    // WPF otherwise strips WS_EX_LAYERED from standard windows.
-                    style |= 0x80000;
-                    handled = true;
-                }
-                Marshal.WriteInt32(lParam, 4, style);
+                // WPF otherwise strips WS_EX_LAYERED from standard windows. Never
+                // alter WS_EX_TOPMOST here: only SetWindowPos may manage its z-order.
+                Marshal.WriteInt32(lParam, 4, Marshal.ReadInt32(lParam, 4) | 0x80000);
+                handled = true;
             }
             // Defer until WPF has updated its cached accessibility/theme properties.
             if (message == 0x001A || message == 0x031A || message == 0x031E || message == 0x0320)
@@ -91,9 +100,9 @@ namespace CopilotSessions
         private bool SynchronizeTopmost()
         {
             if (synchronizingTopmost || source == null || source.IsDisposed) return true;
-            // SetWindowLong is a reentrant read/modify/write. A Pin change during
-            // WM_STYLECHANGING can otherwise be overwritten by the older style word.
-            // Reconcile through SetWindowPos, which also maintains the actual z-order.
+            // Called only after a complete appearance transition/live disposal, never
+            // from WindowMessage. All reentrant style/alpha calls have returned, so
+            // SetWindowPos can safely commit the latest Pin intent to the actual z-order.
             synchronizingTopmost = true;
             try { return Succeeded("restore topmost", native.EnsureTopmost(source.Handle, window.Topmost)); }
             finally { synchronizingTopmost = false; }
@@ -110,24 +119,27 @@ namespace CopilotSessions
                 bool transparency, remote;
                 if (restored && Succeeded("read appearance preferences", native.ReadPreferences(out transparency, out remote)))
                 {
-                    allowEffects = !highContrast && transparency;
+                    allowEffects = !highContrast && transparency && Preference != AppearancePreference.Solid;
                     Succeeded("dark title bar", native.SetAttribute(source.Handle, 20, highContrast ? 0 : 1), true);
                     if (allowEffects)
                     {
                         // Deliberate remote-session policy, not a claim that all RDP
                         // environments lack Acrylic. Prefer a predictable visible effect.
-                        desired = remote ? WindowAppearance.Translucent : TryAcrylic();
+                        desired = Preference == AppearancePreference.Translucent ||
+                                  (Preference == AppearancePreference.Auto && remote)
+                            ? WindowAppearance.Translucent : TryAcrylic();
                     }
                 }
             }
             catch (DllNotFoundException) { desired = allowEffects ? WindowAppearance.Translucent : WindowAppearance.Opaque; }
             catch (EntryPointNotFoundException) { desired = allowEffects ? WindowAppearance.Translucent : WindowAppearance.Opaque; }
+            if (desired == WindowAppearance.Translucent && OpacityPercent == 100) desired = WindowAppearance.Opaque;
             if (desired != WindowAppearance.Acrylic && !ClearEffects()) desired = WindowAppearance.Opaque;
             ApplySurfaces(desired == WindowAppearance.Acrylic);
             if (desired == WindowAppearance.Translucent)
             {
                 keepLayered = true;
-                if (!Succeeded("set uniform alpha", native.SetOpacity(source.Handle, FallbackAlpha)))
+                if (!Succeeded("set uniform alpha", native.SetOpacity(source.Handle, OpacityAlpha)))
                 {
                     ClearEffects();
                     desired = WindowAppearance.Opaque;
@@ -224,9 +236,11 @@ namespace CopilotSessions
             window.Resources[key] = brush;
         }
 
-        private void Closed(object sender, EventArgs args) { Dispose(); }
+        private void Closed(object sender, EventArgs args) { Dispose(true); }
 
-        public void Dispose()
+        public void Dispose() { Dispose(false); }
+
+        private void Dispose(bool closing)
         {
             if (disposed) return;
             disposed = true;
@@ -235,9 +249,14 @@ namespace CopilotSessions
             window.Closed -= Closed;
             if (source != null && !source.IsDisposed)
             {
-                ClearEffects();
-                SynchronizeTopmost();
-                ApplySurfaces(false);
+                // Closed can run after HWND destruction but before HwndSource disposal.
+                // The OS owns cleanup then; native positioning is only valid for a live disposal.
+                if (!closing)
+                {
+                    ClearEffects();
+                    SynchronizeTopmost();
+                    ApplySurfaces(false);
+                }
                 source.RemoveHook(WindowMessage);
             }
             Mode = WindowAppearance.Opaque;
@@ -257,6 +276,8 @@ namespace CopilotSessions
             private static extern int DwmExtendFrameIntoClientArea(IntPtr hwnd, ref Margins margins);
             [DllImport("user32.dll")]
             private static extern int GetSystemMetrics(int index);
+            [DllImport("user32.dll")]
+            private static extern IntPtr GetWindow(IntPtr hwnd, uint command);
             [DllImport("user32.dll", EntryPoint = "GetWindowLongW", SetLastError = true)]
             private static extern int GetWindowLong(IntPtr hwnd, int index);
             [DllImport("user32.dll", EntryPoint = "SetWindowLongW", SetLastError = true)]
@@ -295,13 +316,33 @@ namespace CopilotSessions
 
             public int EnsureTopmost(IntPtr hwnd, bool topmost)
             {
-                SetLastError(0);
-                int style = GetWindowLong(hwnd, -20);
-                if (style == 0 && Marshal.GetLastWin32Error() != 0) return Win32Failure();
-                if (((style & 8) != 0) == topmost) return 0;
+                // A matching style bit does not prove the actual z-order is correct
+                // after a reentrant extended-style update. Commit the current intent.
+                IntPtr band = new IntPtr(topmost ? -1 : -2);
+                IntPtr after = IntPtr.Zero;
+                if (topmost)
+                {
+                    // Stay below an existing topmost predecessor (notably an open
+                    // ContextMenu). HWND_TOPMOST would raise the owner above its popup
+                    // on every live opacity adjustment.
+                    IntPtr previous = GetWindow(hwnd, 3); // GW_HWNDPREV
+                    if (previous != IntPtr.Zero && (GetWindowLong(previous, -20) & 8) != 0)
+                        after = previous;
+                }
                 // Preserve position, size, activation, and owner z-order.
-                return SetWindowPos(hwnd, new IntPtr(topmost ? -1 : -2), 0, 0, 0, 0, 0x213)
-                    ? 0 : Win32Failure();
+                // First establish the band: inserting an unpinned window after the
+                // lowest topmost predecessor alone does not necessarily promote it.
+                if (!SetWindowPos(hwnd, band, 0, 0, 0, 0, 0x213)) return Win32Failure();
+                if (after != IntPtr.Zero && (GetWindowLong(after, -20) & 8) != 0)
+                {
+                    if (!SetWindowPos(hwnd, after, 0, 0, 0, 0, 0x213) || (GetWindowLong(hwnd, -20) & 8) == 0)
+                    {
+                        // The predecessor can disappear or change band concurrently.
+                        // Recover the requested band without depending on a foreign HWND.
+                        if (!SetWindowPos(hwnd, band, 0, 0, 0, 0, 0x213)) return Win32Failure();
+                    }
+                }
+                return 0;
             }
 
             public int SetOpacity(IntPtr hwnd, byte alpha)

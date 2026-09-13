@@ -114,7 +114,11 @@ namespace CopilotSessions
         private string forgottenError;
         private double comfortableWidth = 900, comfortableHeight = 530;
         private string settingsError;
+        private bool updatingPreferences;
+        private IInputElement appearanceReturnFocus;
         public bool IsCompact { get; private set; }
+        internal AppearancePreference Appearance { get; private set; }
+        internal int OpacityPercent { get; private set; }
         public int UnreadCount { get { return Rows.Count(row => row.Unread); } }
 
         internal readonly WindowBackdrop Backdrop;
@@ -171,15 +175,18 @@ namespace CopilotSessions
             pin.Checked += delegate { Window.Topmost = true; };
             pin.Unchecked += delegate { Window.Topmost = false; };
             ToggleButton compact = (ToggleButton)Window.FindName("Compact");
-            compact.IsChecked = LoadCompact();
-            SetCompact(compact.IsChecked == true, false);
+            OpacityPercent = 90;
+            bool initialCompact = LoadPreferences();
+            Backdrop = new WindowBackdrop(Window);
+            Backdrop.Configure(Appearance, OpacityPercent);
+            InitializeAppearance();
+            SetCompact(initialCompact, false);
             compact.Checked += delegate { SetCompact(true); };
             compact.Unchecked += delegate { SetCompact(false); };
-            Backdrop = new WindowBackdrop(Window);
             Window.Closed += delegate { closed = true; };
         }
 
-        private bool LoadCompact()
+        private bool LoadPreferences()
         {
             try
             {
@@ -187,13 +194,113 @@ namespace CopilotSessions
                 var values = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(File.ReadAllText(preferencesPath));
                 if (values == null || !values.ContainsKey("compact") || !(values["compact"] is bool))
                     throw new ArgumentException("Expected a boolean compact preference.");
+                AppearancePreference appearance = AppearancePreference.Auto;
+                int opacity = 90;
+                if (values.ContainsKey("appearance"))
+                {
+                    string mode = values["appearance"] as string;
+                    int index = Array.IndexOf(new[] { "auto", "acrylic", "translucent", "solid" }, mode);
+                    if (index < 0) throw new ArgumentException("Expected appearance: auto, acrylic, translucent, or solid.");
+                    appearance = (AppearancePreference)index;
+                }
+                if (values.ContainsKey("opacity"))
+                {
+                    if (!(values["opacity"] is int) || (int)values["opacity"] < 50 || (int)values["opacity"] > 100)
+                        throw new ArgumentException("Expected an integer opacity percentage from 50 to 100.");
+                    opacity = (int)values["opacity"];
+                }
+                Appearance = appearance;
+                OpacityPercent = opacity;
                 return (bool)values["compact"];
             }
-            catch (IOException error) { settingsError = "Cannot load layout: " + error.Message; }
-            catch (UnauthorizedAccessException error) { settingsError = "Cannot load layout: " + error.Message; }
-            catch (ArgumentException error) { settingsError = "Invalid layout preference: " + error.Message; }
-            catch (InvalidOperationException error) { settingsError = "Invalid layout preference: " + error.Message; }
+            catch (IOException error) { settingsError = "Cannot load preferences: " + error.Message; }
+            catch (UnauthorizedAccessException error) { settingsError = "Cannot load preferences: " + error.Message; }
+            catch (ArgumentException error) { settingsError = "Invalid preferences: " + error.Message; }
+            catch (InvalidOperationException error) { settingsError = "Invalid preferences: " + error.Message; }
             return false;
+        }
+
+        private void InitializeAppearance()
+        {
+            var button = (Button)Window.FindName("AppearanceButton");
+            var menu = button.ContextMenu;
+            var slider = (Slider)Window.FindName("AppearanceOpacity");
+            button.PreviewMouseDown += delegate { appearanceReturnFocus = Keyboard.FocusedElement; };
+            button.Click += delegate
+            {
+                if (appearanceReturnFocus == null) appearanceReturnFocus = Keyboard.FocusedElement;
+                menu.PlacementTarget = button;
+                menu.IsOpen = true;
+            };
+            menu.Opened += delegate
+            {
+                foreach (MenuItem item in menu.Items.OfType<MenuItem>())
+                    if (item.IsChecked) { item.Focus(); break; }
+            };
+            menu.Closed += delegate
+            {
+                IInputElement target = appearanceReturnFocus ?? button;
+                appearanceReturnFocus = null;
+                Window.Dispatcher.BeginInvoke(DispatcherPriority.Input, new Action(delegate
+                {
+                    if (!closed) Keyboard.Focus(target);
+                }));
+            };
+            menu.PreviewKeyDown += delegate(object sender, KeyEventArgs args)
+            {
+                if (args.Key == Key.Tab && slider.IsEnabled)
+                {
+                    if (slider.IsKeyboardFocusWithin)
+                        menu.Items.OfType<MenuItem>().First(item => item.IsChecked).Focus();
+                    else slider.Focus();
+                    args.Handled = true;
+                }
+                else if (args.Key == Key.Escape) { menu.IsOpen = false; args.Handled = true; }
+            };
+            foreach (MenuItem item in menu.Items.OfType<MenuItem>().Where(item => item.Tag != null))
+                item.Click += delegate(object sender, RoutedEventArgs args)
+                {
+                    var choice = (MenuItem)sender;
+                    ChangeAppearance((AppearancePreference)Enum.Parse(typeof(AppearancePreference), (string)choice.Tag),
+                                     OpacityPercent);
+                    args.Handled = true;
+                };
+            slider.ValueChanged += delegate
+            {
+                if (updatingPreferences) return;
+                int percent = (int)Math.Round(slider.Value, MidpointRounding.AwayFromZero);
+                if (percent != OpacityPercent) ChangeAppearance(Appearance, percent);
+                else SynchronizePreferenceControls();
+            };
+        }
+
+        private void ChangeAppearance(AppearancePreference appearance, int opacity)
+        {
+            if (updatingPreferences) return;
+            if (SavePreferences(IsCompact, appearance, opacity))
+            {
+                Appearance = appearance;
+                OpacityPercent = opacity;
+                Backdrop.Configure(appearance, opacity);
+            }
+            SynchronizePreferenceControls();
+        }
+
+        private void SynchronizePreferenceControls()
+        {
+            updatingPreferences = true;
+            try
+            {
+                ((ToggleButton)Window.FindName("Compact")).IsChecked = IsCompact;
+                var menu = ((Button)Window.FindName("AppearanceButton")).ContextMenu;
+                foreach (MenuItem item in menu.Items.OfType<MenuItem>().Where(item => item.Tag != null))
+                    item.IsChecked = String.Equals((string)item.Tag, Appearance.ToString(), StringComparison.Ordinal);
+                var slider = (Slider)Window.FindName("AppearanceOpacity");
+                slider.Value = OpacityPercent;
+                slider.IsEnabled = Appearance == AppearancePreference.Auto || Appearance == AppearancePreference.Translucent;
+                ((TextBlock)Window.FindName("OpacityLabel")).Text = "Translucent opacity: " + OpacityPercent + "%";
+            }
+            finally { updatingPreferences = false; }
         }
 
         private void LoadForgotten()
@@ -261,6 +368,12 @@ namespace CopilotSessions
 
         public void SetCompact(bool compact, bool save = true)
         {
+            if (updatingPreferences) return;
+            if (save && !SavePreferences(compact, Appearance, OpacityPercent))
+            {
+                SynchronizePreferenceControls();
+                return;
+            }
             if (compact && !IsCompact)
             {
                 comfortableWidth = Window.Width;
@@ -285,23 +398,29 @@ namespace CopilotSessions
             Window.MinHeight = compact ? 230 : 380;
             Window.Width = compact ? 480 : comfortableWidth;
             Window.Height = compact ? 300 : comfortableHeight;
-            if (!save) return;
+            SynchronizePreferenceControls();
+        }
+
+        private bool SavePreferences(bool compact, AppearancePreference appearance, int opacity)
+        {
             try
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(preferencesPath));
                 string scratch = preferencesPath + "." + Guid.NewGuid().ToString("N");
                 try
                 {
-                    File.WriteAllText(scratch, new JavaScriptSerializer().Serialize(new { compact = compact }));
+                    File.WriteAllText(scratch, new JavaScriptSerializer().Serialize(
+                        new { compact = compact, appearance = appearance.ToString().ToLowerInvariant(), opacity = opacity }));
                     if (File.Exists(preferencesPath)) File.Replace(scratch, preferencesPath, null);
                     else File.Move(scratch, preferencesPath);
                 }
                 finally { if (File.Exists(scratch)) File.Delete(scratch); }
                 settingsError = null;
             }
-            catch (IOException error) { settingsError = "Cannot save layout: " + error.Message; }
-            catch (UnauthorizedAccessException error) { settingsError = "Cannot save layout: " + error.Message; }
-            if (settingsError != null) SetErrors(new string[0]);
+            catch (IOException error) { settingsError = "Cannot save preferences: " + error.Message; }
+            catch (UnauthorizedAccessException error) { settingsError = "Cannot save preferences: " + error.Message; }
+            SetErrors(latestSnapshot == null ? new string[0] : latestSnapshot.errors);
+            return settingsError == null;
         }
 
         public void MarkSelectedRead()

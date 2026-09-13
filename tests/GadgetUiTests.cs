@@ -85,6 +85,12 @@ public static class GadgetUiTests
     private static extern int GetWindowLong(IntPtr hwnd, int index);
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool GetLayeredWindowAttributes(IntPtr hwnd, out uint color, out byte alpha, out uint flags);
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int width, int height, uint flags);
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetWindow(IntPtr hwnd, uint command);
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool PostMessage(IntPtr hwnd, int message, IntPtr wparam, IntPtr lparam);
 
     private sealed class BackdropNative : IBackdropNative
     {
@@ -168,9 +174,27 @@ public static class GadgetUiTests
             byte alpha;
             Check((style & 0x80000) != 0, "Uniform-alpha fallback lost its native layered style");
             Check(GetLayeredWindowAttributes(hwnd, out color, out alpha, out flags) &&
-                  alpha == WindowBackdrop.FallbackAlpha && flags == 2, "Incorrect native fallback alpha");
+                  alpha == app.Backdrop.OpacityAlpha && flags == 2, "Incorrect native fallback alpha");
         }
         else Check((style & 0x80000) == 0, "Opaque/Acrylic modes must restore normal composition");
+    }
+
+    private static void CheckActualTopmost(SessionWindow app, Window witness, bool pinned)
+    {
+        IntPtr gadget = new WindowInteropHelper(app.Window).Handle;
+        IntPtr normal = new WindowInteropHelper(witness).Handle;
+        Check(SetWindowPos(normal, IntPtr.Zero, 0, 0, 0, 0, 0x213),
+              "Could not raise the independent normal witness: " + Marshal.GetLastWin32Error());
+        Check((GetWindowLong(normal, -20) & 8) == 0, "Witness must remain a normal, non-topmost window");
+        IntPtr above = pinned ? gadget : normal;
+        IntPtr below = pinned ? normal : gadget;
+        for (int count = 0; count < 1000 && below != IntPtr.Zero; count++)
+        {
+            below = GetWindow(below, 3); // GW_HWNDPREV: actual z-order, not a style-bit proxy.
+            if (below == above) return;
+        }
+        throw new InvalidOperationException("Actual z-order did not match pin=" + pinned +
+            "; gadget style=0x" + GetWindowLong(gadget, -20).ToString("X8"));
     }
 
     private static void TestBackdrop(SessionWindow app)
@@ -215,6 +239,37 @@ public static class GadgetUiTests
         Check(app.Backdrop.Mode == original, "Settings notification did not restore the appropriate appearance");
         CheckNativeAppearance(app);
         var pin = (ToggleButton)app.Window.FindName("Pin");
+        var witness = new Window { Title = "Synthetic z-order witness", Width = 120, Height = 70,
+            Left = app.Window.Left + 30, Top = app.Window.Top + 70, WindowStartupLocation = WindowStartupLocation.Manual,
+            ShowActivated = false, ShowInTaskbar = false, Content = new TextBlock { Text = "Z-order test" } };
+        witness.Show();
+        Pump();
+        try
+        {
+        IntPtr gadgetHandle = new WindowInteropHelper(app.Window).Handle;
+        IntPtr proposedStyle = Marshal.AllocHGlobal(8);
+        try
+        {
+            int currentStyle = GetWindowLong(gadgetHandle, -20);
+            int requestedStyle = currentStyle ^ 8;
+            Marshal.WriteInt32(proposedStyle, 0, currentStyle);
+            Marshal.WriteInt32(proposedStyle, 4, requestedStyle);
+            // Preflight only: do not apply this word to the actual window.
+            SendMessage(gadgetHandle, 0x007C, new IntPtr(-20), proposedStyle);
+            int returnedStyle = Marshal.ReadInt32(proposedStyle, 4);
+            Check(((returnedStyle ^ requestedStyle) & ~0x80000) == 0, String.Format(
+                "Style hook corrupted a Win32 topmost request: requested=0x{0:X8}, returned=0x{1:X8}",
+                requestedStyle, returnedStyle));
+        }
+        finally { Marshal.FreeHGlobal(proposedStyle); }
+        // A genuine native z-order operation must not be vetoed by rewriting its
+        // STYLESTRUCT from a managed property that may not yet reflect the operation.
+        bool nativePin = SetWindowPos(gadgetHandle, new IntPtr(-1), 0, 0, 0, 0, 0x213);
+        int nativePinError = Marshal.GetLastWin32Error();
+        Check(nativePin, "Genuine SetWindowPos(HWND_TOPMOST) was rejected: " + nativePinError);
+        CheckActualTopmost(app, witness, true);
+        Check(SetWindowPos(gadgetHandle, new IntPtr(-2), 0, 0, 0, 0, 0x213), "Genuine native unpin was rejected");
+        CheckActualTopmost(app, witness, false);
         for (int cycle = 0; cycle < 30; cycle++)
         {
             if (cycle % 3 == 0)
@@ -224,17 +279,21 @@ public static class GadgetUiTests
             Check(app.Window.Topmost && (beforeReset & 8) != 0, String.Format(
                 "Pin did not immediately update native topmost: cycle={0}, managed={1}, pin={2}, style=0x{3:X8}",
                 cycle, app.Window.Topmost, pin.IsChecked, beforeReset));
+            CheckActualTopmost(app, witness, true);
             app.Backdrop.Refresh(true);
             int afterReset = GetWindowLong(new WindowInteropHelper(app.Window).Handle, -20);
             Check((afterReset & 8) != 0, String.Format(
                 "Opacity reset lost topmost: before=0x{0:X8}, after=0x{1:X8}, managed={2}, pin={3}",
                 beforeReset, afterReset, app.Window.Topmost, pin.IsChecked));
+            CheckActualTopmost(app, witness, true);
             CheckNativeAppearance(app);
             app.Backdrop.Refresh(SystemParameters.HighContrast);
             Check((GetWindowLong(new WindowInteropHelper(app.Window).Handle, -20) & 8) != 0, "Opacity enable lost topmost");
+            CheckActualTopmost(app, witness, true);
             CheckNativeAppearance(app);
             pin.IsChecked = false;
             Check((GetWindowLong(new WindowInteropHelper(app.Window).Handle, -20) & 8) == 0, "Unpin did not immediately clear native topmost");
+            CheckActualTopmost(app, witness, false);
             Pump();
             CheckNativeAppearance(app);
             Check((GetWindowLong(new WindowInteropHelper(app.Window).Handle, -20) & 8) == 0, "Appearance prevents unpinning");
@@ -261,16 +320,39 @@ public static class GadgetUiTests
                 app.Backdrop.Refresh(true);
                 Check(!changePin && app.Window.Topmost, "Reentrant pin fixture did not run");
                 Check((GetWindowLong(source.Handle, -20) & 8) != 0, "In-flight opacity reset overwrote a new pin");
+                CheckActualTopmost(app, witness, true);
                 pinValue = false;
                 changePin = true;
                 app.Backdrop.Refresh(SystemParameters.HighContrast);
                 Check(!changePin && !app.Window.Topmost, "Reentrant unpin fixture did not run");
                 Check((GetWindowLong(source.Handle, -20) & 8) == 0, "In-flight opacity enable resurrected an old pin");
+                CheckActualTopmost(app, witness, false);
                 CheckNativeAppearance(app);
             }
             finally { source.RemoveHook(reentrantPin); pin.IsChecked = false; }
         }
-        Console.WriteLine("Native topmost: 30 pin/appearance cycles passed; reentrant layered transitions={0}.",
+        foreach (AppearancePreference requested in Enum.GetValues(typeof(AppearancePreference)))
+        {
+            pin.IsChecked = true;
+            app.Backdrop.Configure(requested, 90);
+            CheckNativeAppearance(app);
+            CheckActualTopmost(app, witness, true);
+            pin.IsChecked = false;
+            CheckActualTopmost(app, witness, false);
+        }
+        pin.IsChecked = true;
+        foreach (int opacity in new[] { 75, 100, 90 })
+        {
+            app.Backdrop.Configure(AppearancePreference.Translucent, opacity);
+            CheckNativeAppearance(app);
+            CheckActualTopmost(app, witness, true);
+        }
+        pin.IsChecked = false;
+        app.Backdrop.Configure(app.Appearance, app.OpacityPercent);
+        CheckActualTopmost(app, witness, false);
+        }
+        finally { witness.Close(); }
+        Console.WriteLine("Native topmost: 30 immediate pin/appearance cycles and independent normal-window z-order passed; reentrant={0}.",
                           original == WindowAppearance.Translucent);
         int chrome = GetWindowLong(new WindowInteropHelper(app.Window).Handle, -16);
         Check((chrome & 0x00CF0000) == 0x00CF0000, "Native resize/caption/minimize/maximize/system-menu styles changed");
@@ -342,6 +424,19 @@ public static class GadgetUiTests
             native.Composition = true;
             backdrop.Refresh(false);
             Check(backdrop.IsEnabled, "Composition recovery failed");
+            foreach (AppearancePreference requested in Enum.GetValues(typeof(AppearancePreference)))
+            {
+                native.Transparency = false;
+                backdrop.Configure(requested, 75);
+                Check(backdrop.Mode == WindowAppearance.Opaque && backdrop.Preference == requested && native.Alpha == 255,
+                      "Windows transparency preference must override every requested appearance");
+                native.Transparency = true;
+                backdrop.Configure(requested, 75);
+                backdrop.Refresh(true);
+                Check(backdrop.Mode == WindowAppearance.Opaque && backdrop.Preference == requested && native.Alpha == 255,
+                      "High contrast must override every requested appearance");
+            }
+            backdrop.Configure(AppearancePreference.Auto, 90);
             native.Remote = true;
             backdrop.Refresh(false);
             SendMessage(new WindowInteropHelper(window).Handle, 0x031E, IntPtr.Zero, IntPtr.Zero);
@@ -371,6 +466,18 @@ public static class GadgetUiTests
             CheckSolid(disposableWindow);
         }
         finally { disposableBackdrop.Dispose(); disposableWindow.Close(); }
+        var closingNative = new BackdropNative();
+        var closingWindow = new Window { Width = 100, Height = 100, ShowInTaskbar = false };
+        var closingBackdrop = new WindowBackdrop(closingWindow, closingNative);
+        try
+        {
+            new WindowInteropHelper(closingWindow).EnsureHandle();
+            int calls = closingNative.Calls;
+            closingWindow.Close();
+            Pump();
+            Check(closingNative.Calls == calls, "Closed attempted native cleanup/positioning on a dying HWND");
+        }
+        finally { closingWindow.Close(); closingBackdrop.Dispose(); }
     }
 
     private sealed class SyntheticBackdrop : FrameworkElement
@@ -390,6 +497,312 @@ public static class GadgetUiTests
                     drawing.DrawRectangle(new SolidColorBrush(color), null, new Rect(x, y, 12, 12));
                 }
         }
+    }
+
+    private static void Invoke(Control control)
+    {
+        var peer = UIElementAutomationPeer.CreatePeerForElement(control);
+        var invoke = peer.GetPattern(PatternInterface.Invoke) as IInvokeProvider;
+        Check(invoke != null, "Missing Invoke pattern: " + control.Name);
+        invoke.Invoke();
+        Pump();
+    }
+
+    private static void ChooseAppearance(SessionWindow app, string name)
+    {
+        var button = (Button)app.Window.FindName("AppearanceButton");
+        if (!button.ContextMenu.IsOpen) Invoke(button);
+        var choice = (MenuItem)app.Window.FindName("Appearance" + name);
+        Invoke(choice);
+        Pump();
+        Check(choice.IsChecked, "Appearance choice was not checked: " + name);
+        Check(button.ContextMenu.Items.OfType<MenuItem>().Count(item => item.IsChecked) == 1,
+              "Appearance choices must be mutually exclusive");
+    }
+
+    private static void SetOpacity(SessionWindow app, int percent)
+    {
+        var button = (Button)app.Window.FindName("AppearanceButton");
+        if (!button.ContextMenu.IsOpen) Invoke(button);
+        var slider = (Slider)app.Window.FindName("AppearanceOpacity");
+        var range = (IRangeValueProvider)UIElementAutomationPeer.CreatePeerForElement(slider).GetPattern(PatternInterface.RangeValue);
+        range.SetValue(percent);
+        Pump();
+        Check(slider.Value == percent && app.OpacityPercent == percent, "Opacity slider did not apply its integer value");
+    }
+
+    private static void Press(UIElement target, Key key)
+    {
+        var menu = target as ContextMenu;
+        if (menu != null && !menu.IsOpen && key == Key.Escape) return;
+        var args = new KeyEventArgs(Keyboard.PrimaryDevice, PresentationSource.FromVisual(target),
+            Environment.TickCount, key) { RoutedEvent = Keyboard.PreviewKeyDownEvent };
+        target.RaiseEvent(args);
+        if (!args.Handled)
+        {
+            args.RoutedEvent = Keyboard.KeyDownEvent;
+            target.RaiseEvent(args);
+        }
+        Pump();
+    }
+
+    private static void TestAppearance(SessionWindow app, string preferences)
+    {
+        app.Apply(new Snapshot { rows = new SessionData[0], errors = new string[0] });
+        app.Apply(Sample());
+        app.Grid.SelectedItem = app.Rows.Single(row => row.Status == "In progress");
+        Snapshot done = Sample();
+        done.rows[0].status = "Done";
+        app.Apply(done);
+        SessionRow selected = (SessionRow)app.Grid.SelectedItem;
+        int unread = app.UnreadCount;
+        Check(unread == 1, "Appearance fixture needs a selected unread completion");
+        string forgottenPath = Path.Combine(Path.GetDirectoryName(preferences), "gadget-forgotten.json");
+        const string forgotten = "{\"Windows/appearance-sentinel\":\"00000000000000000001/sentinel\"}";
+        File.WriteAllText(forgottenPath, forgotten);
+        var button = (Button)app.Window.FindName("AppearanceButton");
+        var slider = (Slider)app.Window.FindName("AppearanceOpacity");
+        Check(UIElementAutomationPeer.CreatePeerForElement(button).GetName() == "Appearance",
+              "Appearance button has no discoverable automation name");
+        app.Grid.Focus();
+        IInputElement focus = Keyboard.FocusedElement;
+        Invoke(button);
+        Check(button.ContextMenu.IsOpen, "Appearance button did not open the menu");
+        Press(button.ContextMenu, Key.Tab);
+        Check(slider.IsKeyboardFocusWithin, "Tab does not reach the opacity slider");
+        Press(slider, Key.Left);
+        Check(app.OpacityPercent == 89, "Keyboard Left did not adjust opacity");
+        Press(slider, Key.Right);
+        Check(app.OpacityPercent == 90, "Keyboard Right did not restore opacity");
+        Press(button.ContextMenu, Key.Escape);
+        Check(!button.ContextMenu.IsOpen, "Escape did not close Appearance");
+        Check(Keyboard.FocusedElement == focus, "Appearance menu did not restore prior focus");
+
+        bool effects = !SystemParameters.HighContrast && app.Backdrop.Mode != WindowAppearance.Opaque;
+        Invoke(button);
+        ((MenuItem)app.Window.FindName("AppearanceAuto")).Focus();
+        foreach (string next in new[] { "Acrylic", "Translucent", "Solid" })
+        {
+            Press((UIElement)Keyboard.FocusedElement, Key.Down);
+            Check(Keyboard.FocusedElement == app.Window.FindName("Appearance" + next), "Menu arrow navigation failed");
+        }
+        Press((UIElement)Keyboard.FocusedElement, Key.Enter);
+        Check(app.Appearance == AppearancePreference.Solid, "Keyboard Enter did not choose Solid");
+        ChooseAppearance(app, "Translucent");
+        var pin = (ToggleButton)app.Window.FindName("Pin");
+        pin.IsChecked = true;
+        foreach (int percent in new[] { 50, 75, 90, 100, 75 })
+        {
+            SetOpacity(app, percent);
+            Check(app.Appearance == AppearancePreference.Translucent, "Slider changed the requested appearance");
+            Check(app.Backdrop.OpacityAlpha == (byte)Math.Round(percent * 255.0 / 100, MidpointRounding.AwayFromZero),
+                  "Opacity conversion did not round deliberately");
+            Check(app.Backdrop.Mode == (effects && percent < 100 ? WindowAppearance.Translucent : WindowAppearance.Opaque),
+                  "Unexpected effective mode for configured opacity");
+            CheckNativeAppearance(app);
+            Check((GetWindowLong(new WindowInteropHelper(app.Window).Handle, -20) & 8) != 0,
+                  "Changing opacity lost pin state");
+        }
+        Check(app.Backdrop.OpacityAlpha == 191, "75% alpha must be 191");
+        Check(slider.Minimum == 50 && slider.Maximum == 100 && slider.IsSnapToTickEnabled && slider.TickFrequency == 1,
+              "Opacity slider range/snapping changed");
+        Press(button.ContextMenu, Key.Escape);
+        ((ToggleButton)app.Window.FindName("Compact")).IsChecked = true;
+        Pump();
+        var restored = new SessionWindow(preferences);
+        try
+        {
+            Check(restored.IsCompact && restored.Appearance == AppearancePreference.Translucent &&
+                  restored.OpacityPercent == 75, "Appearance/opacity/compact did not survive reload together");
+        }
+        finally { restored.Window.Close(); }
+        foreach (string mode in new[] { "Acrylic", "Solid", "Auto", "Translucent" })
+        {
+            ChooseAppearance(app, mode);
+            Check(app.Appearance.ToString() == mode && app.Backdrop.Preference == app.Appearance,
+                  "Requested preference was confused with the effective mode");
+            Check(slider.IsEnabled == (mode == "Auto" || mode == "Translucent"), "Incorrect slider enablement");
+            if (mode == "Solid") Check(app.Backdrop.Mode == WindowAppearance.Opaque, "Solid choice is not opaque");
+            if (mode == "Acrylic" && effects)
+            {
+                int nativeMode;
+                if (DwmGetWindowAttribute(new WindowInteropHelper(app.Window).Handle, 38, out nativeMode, 4) == 0)
+                    Check(app.Backdrop.Mode == WindowAppearance.Acrylic && nativeMode == 3,
+                          "Explicit Acrylic did not request the supported native material, including remotely");
+            }
+            CheckNativeAppearance(app);
+            Check(app.IsCompact, "Changing appearance reset the compact layout");
+            Check((GetWindowLong(new WindowInteropHelper(app.Window).Handle, -20) & 8) != 0,
+                  "Changing appearance lost pin state");
+        }
+        SetOpacity(app, 90);
+        ChooseAppearance(app, "Auto");
+        Press(button.ContextMenu, Key.Escape);
+        ((ToggleButton)app.Window.FindName("Compact")).IsChecked = false;
+        pin.IsChecked = false;
+        Check(Object.ReferenceEquals(selected, app.Grid.SelectedItem) && app.UnreadCount == unread,
+              "Opening/changing appearance consumed unread state or changed selection");
+        Check(File.ReadAllText(forgottenPath) == forgotten, "Appearance/layout saving changed Forget preferences");
+        File.Delete(forgottenPath);
+        foreach (bool compact in new[] { false, true })
+        {
+            app.SetCompact(compact, false);
+            app.Window.Width = app.Window.MinWidth;
+            Pump();
+            var heading = (FrameworkElement)app.Window.FindName("Heading");
+            var compactButton = (FrameworkElement)app.Window.FindName("Compact");
+            Point headingRight = heading.TranslatePoint(new Point(heading.ActualWidth, 0), app.Window);
+            Point controlsLeft = compactButton.TranslatePoint(new Point(), app.Window);
+            Point gearRight = button.TranslatePoint(new Point(button.ActualWidth, 0), app.Window);
+            Check(button.IsVisible && headingRight.X <= controlsLeft.X + 1 && gearRight.X <= app.Window.ActualWidth,
+                  "Appearance header controls overlap or overflow at minimum width");
+        }
+        app.SetCompact(false, false);
+        app.Apply(new Snapshot { rows = new SessionData[0], errors = new string[0] });
+        app.Apply(Sample());
+        Console.WriteLine("Appearance UI: menu, focus, opacity 50/75/90/100, modes, persistence, pin and minimum widths passed.");
+    }
+
+    private static void TestAppearancePreferences(string directory)
+    {
+        string root = Path.Combine(directory, "appearance-preferences");
+        Directory.CreateDirectory(root);
+        string path = Path.Combine(root, "gadget-ui.json");
+        try
+        {
+            File.WriteAllText(path, "{\"compact\":true}");
+            var legacy = new SessionWindow(path);
+            try
+            {
+                Check(legacy.IsCompact && legacy.Appearance == AppearancePreference.Auto && legacy.OpacityPercent == 90,
+                      "Legacy compact-only preference did not default to Auto/90");
+            }
+            finally { legacy.Window.Close(); }
+            string[] invalid = {
+                "null", "{}", "{\"compact\":\"true\"}",
+                "{\"compact\":true,\"appearance\":\"unknown\"}", "{\"compact\":true,\"appearance\":1}",
+                "{\"compact\":true,\"appearance\":null}", "{\"compact\":true,\"appearance\":true}",
+                "{\"compact\":true,\"opacity\":49}", "{\"compact\":true,\"opacity\":101}",
+                "{\"compact\":true,\"opacity\":75.5}", "{\"compact\":true,\"opacity\":\"90\"}",
+                "{\"compact\":true,\"opacity\":null}", "{\"compact\":true,\"opacity\":true}",
+                "{\"compact\":true,\"opacity\":NaN}", "{\"compact\":true,\"opacity\":Infinity}",
+                "{\"compact\":true,\"opacity\":1e999}"
+            };
+            foreach (string json in invalid)
+            {
+                File.WriteAllText(path, json);
+                var bad = new SessionWindow(path);
+                try
+                {
+                    bad.Apply(Sample());
+                    Check(!bad.IsCompact && bad.Appearance == AppearancePreference.Auto && bad.OpacityPercent == 90,
+                          "Invalid preference was partially accepted: " + json);
+                    Check(((FrameworkElement)bad.Window.FindName("ErrorPanel")).Visibility == Visibility.Visible,
+                          "Invalid preference was not surfaced: " + json);
+                }
+                finally { bad.Window.Close(); }
+            }
+            File.Delete(path);
+            Directory.CreateDirectory(path);
+            var failure = new SessionWindow(path);
+            try
+            {
+                failure.Apply(Sample());
+                failure.Window.Show();
+                Pump();
+                var button = (Button)failure.Window.FindName("AppearanceButton");
+                Invoke(button);
+                Invoke((MenuItem)failure.Window.FindName("AppearanceSolid"));
+                Check(failure.Appearance == AppearancePreference.Auto &&
+                      ((MenuItem)failure.Window.FindName("AppearanceAuto")).IsChecked,
+                      "Failed save left a falsely persisted appearance");
+                Invoke(button);
+                ((Slider)failure.Window.FindName("AppearanceOpacity")).Value = 75;
+                Check(failure.OpacityPercent == 90 && ((Slider)failure.Window.FindName("AppearanceOpacity")).Value == 90,
+                      "Failed opacity save did not revert the slider");
+                Press(button.ContextMenu, Key.Escape);
+                ((ToggleButton)failure.Window.FindName("Compact")).IsChecked = true;
+                Check(!failure.IsCompact && ((ToggleButton)failure.Window.FindName("Compact")).IsChecked == false,
+                      "Failed compact save did not revert coherently");
+                Check(((TextBlock)failure.Window.FindName("ErrorText")).Text.Contains("Cannot save"),
+                      "Persistence failure was not reported in the existing error panel");
+                Check(Directory.GetFiles(root).Length == 0, "Failed preference save leaked an atomic scratch file");
+                Directory.Delete(path);
+                ChooseAppearance(failure, "Solid");
+                Check(((FrameworkElement)failure.Window.FindName("ErrorPanel")).Visibility == Visibility.Collapsed,
+                      "Successful retry did not clear the preference error");
+            }
+            finally { failure.Window.Close(); }
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    private static void CheckOpenAppearanceMenu(SessionWindow app)
+    {
+        var menu = ((Button)app.Window.FindName("AppearanceButton")).ContextMenu;
+        Check(menu.IsOpen, "Opacity adjustment closed Appearance");
+        var popup = PresentationSource.FromVisual(menu) as HwndSource;
+        Check(popup != null, "Open Appearance menu lost its native source");
+        IntPtr scan = new WindowInteropHelper(app.Window).Handle;
+        bool above = false;
+        for (int count = 0; count < 1000 && scan != IntPtr.Zero; count++)
+        {
+            scan = GetWindow(scan, 3);
+            if (scan == popup.Handle) { above = true; break; }
+        }
+        Check(above, "Opacity adjustment raised the gadget above its open menu");
+        var auto = (MenuItem)app.Window.FindName("AppearanceAuto");
+        Check(auto.IsVisible && auto.IsEnabled, "Auto is unavailable after opacity adjustment");
+    }
+
+    private static void TestAppearanceMenuAdjustment(SessionWindow app)
+    {
+        var button = (Button)app.Window.FindName("AppearanceButton");
+        var menu = button.ContextMenu;
+        var slider = (Slider)app.Window.FindName("AppearanceOpacity");
+        var pin = (ToggleButton)app.Window.FindName("Pin");
+        int closes = 0;
+        RoutedEventHandler trackClosed = delegate { closes++; };
+        menu.Closed += trackClosed;
+        try
+        {
+            foreach (bool pinned in new[] { false, true })
+            {
+                pin.IsChecked = pinned;
+                ChooseAppearance(app, "Translucent");
+                SetOpacity(app, 75);
+                CheckOpenAppearanceMenu(app);
+                slider.Focus();
+                Pump();
+                int initialCloses = closes;
+                var popup = (HwndSource)PresentationSource.FromVisual(slider);
+                for (int expected = 76; expected <= 90; expected++)
+                {
+                    // Target only this synthetic popup; never inject global keyboard input.
+                    Check(PostMessage(popup.Handle, 0x0100, new IntPtr(0x27), new IntPtr(0x014D0001)),
+                          "Could not post native Right key-down");
+                    Check(PostMessage(popup.Handle, 0x0101, new IntPtr(0x27), new IntPtr(unchecked((int)0xC14D0001))),
+                          "Could not post native Right key-up");
+                    Pump();
+                    Check(slider.Value == expected && app.OpacityPercent == expected, "Native slider keyboard adjustment failed");
+                    Check(closes == initialCloses, "Keyboard opacity adjustment emitted a Closed event");
+                    CheckOpenAppearanceMenu(app);
+                    CheckNativeAppearance(app);
+                }
+                Invoke(button);
+                CheckOpenAppearanceMenu(app);
+                ChooseAppearance(app, "Auto");
+                Check(app.Appearance == AppearancePreference.Auto && app.OpacityPercent == 90,
+                      "Auto could not be selected after native slider adjustments");
+            }
+        }
+        finally
+        {
+            menu.Closed -= trackClosed;
+            menu.IsOpen = false;
+            pin.IsChecked = false;
+        }
+        Console.WriteLine("Appearance popup: 30 native Right keys, pinned/unpinned, visible z-order and subsequent Auto selection passed.");
     }
 
     [DllImport("user32.dll")]
@@ -527,13 +940,19 @@ public static class GadgetUiTests
                   "Opaque fallback leaks the synthetic background");
             File.WriteAllText(stem + "-measurements.txt", String.Format(
                 "Mode={0}\r\nNativeAlpha={1}\r\nRemoteSession={2}\r\nForeground={3}\r\nMeanRGBDelta={4:F6}\r\nOpaqueRGBDelta={5:F6}\r\n",
-                capturedMode, capturedMode == WindowAppearance.Translucent ? WindowBackdrop.FallbackAlpha : 255,
+                capturedMode, capturedMode == WindowAppearance.Translucent ? app.Backdrop.OpacityAlpha : 255,
                 GetSystemMetrics(0x1000) != 0, foreground, change, solidChange));
             app.Backdrop.Refresh(SystemParameters.HighContrast);
+            Invoke((Button)app.Window.FindName("AppearanceButton"));
+            CaptureScreen(background, stem + "-menu.png");
+            Press(((Button)app.Window.FindName("AppearanceButton")).ContextMenu, Key.Escape);
             app.SetCompact(true, false);
             Pump();
             CheckNativeAppearance(app);
             CaptureScreen(background, stem + "-compact.png");
+            Invoke((Button)app.Window.FindName("AppearanceButton"));
+            CaptureScreen(background, stem + "-compact-menu.png");
+            Press(((Button)app.Window.FindName("AppearanceButton")).ContextMenu, Key.Escape);
             app.SetCompact(false, false);
             app.Window.Hide();
             CaptureScreen(background, stem + "-background.png");
@@ -806,6 +1225,9 @@ public static class GadgetUiTests
             app.Window.Show();
             Pump();
             TestBackdrop(app);
+            TestAppearance(app, preferences);
+            TestAppearanceMenuAdjustment(app);
+            TestAppearancePreferences(directory);
             Check(app.Window.Icon != null, "Missing application icon");
             foreach (DataGridColumn column in app.Grid.Columns)
             {

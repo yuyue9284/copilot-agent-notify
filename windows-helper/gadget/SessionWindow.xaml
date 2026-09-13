@@ -235,6 +235,39 @@
         </Setter.Value>
       </Setter>
     </Style>
+    <Style x:Key="AppearanceItemStyle" TargetType="MenuItem">
+      <Setter Property="Foreground" Value="#ECF1F7"/>
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="Padding" Value="10,7"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="MenuItem">
+            <Border x:Name="MenuSurface" Background="{TemplateBinding Background}" CornerRadius="4"
+                    BorderThickness="1" BorderBrush="Transparent" Padding="{TemplateBinding Padding}">
+              <Grid>
+                <Grid.ColumnDefinitions><ColumnDefinition Width="20"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                <TextBlock x:Name="ChoiceCheck" Text="&#x2713;" Foreground="#86E3D1" Visibility="Hidden"/>
+                <ContentPresenter Grid.Column="1" ContentSource="Header" RecognizesAccessKey="True"/>
+              </Grid>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsChecked" Value="True">
+                <Setter TargetName="ChoiceCheck" Property="Visibility" Value="Visible"/>
+              </Trigger>
+              <Trigger Property="IsHighlighted" Value="True">
+                <Setter TargetName="MenuSurface" Property="Background" Value="#29384B"/>
+              </Trigger>
+              <Trigger Property="IsKeyboardFocusWithin" Value="True">
+                <Setter TargetName="MenuSurface" Property="BorderBrush" Value="#86E3D1"/>
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False">
+                <Setter Property="Foreground" Value="#77899F"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
   </Window.Resources>
   <Border Background="{DynamicResource WindowSurface}">
   <Grid x:Name="RootLayout" Margin="24,20,24,16">
@@ -255,8 +288,9 @@
         <Image x:Name="AppLogo" Stretch="Uniform"/>
       </Border>
       <StackPanel Grid.Column="1">
-        <TextBlock x:Name="Heading" Text="Sessions" FontSize="25" FontWeight="SemiBold"/>
+        <TextBlock x:Name="Heading" Text="Sessions" FontSize="25" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
         <TextBlock Text="Your agents, across Windows and WSL" Foreground="{StaticResource Muted}" Margin="0,3,0,0"
+                   TextTrimming="CharacterEllipsis"
                    Visibility="{DynamicResource DetailVisibility}"/>
       </StackPanel>
       <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
@@ -266,6 +300,55 @@
       <ToggleButton x:Name="Pin" Style="{StaticResource PinStyle}"
                     VerticalAlignment="Center" ToolTip="Keep this window above other apps"
                     AutomationProperties.Name="Always on top" Content="Always on top"/>
+      <Button x:Name="AppearanceButton" Style="{StaticResource ReadButtonStyle}" Width="34" Height="34"
+              Margin="8,0,0,0" Padding="8" FontFamily="Segoe MDL2 Assets" Content="&#xE713;"
+              ToolTip="Appearance" AutomationProperties.Name="Appearance" AutomationProperties.AutomationId="AppearanceButton">
+        <Button.ContextMenu>
+          <ContextMenu x:Name="AppearanceMenu" Background="#1B2533" Foreground="#ECF1F7"
+                       BorderBrush="#334156" BorderThickness="1" Padding="5" Width="270" HorizontalOffset="-236"
+                       FontFamily="Segoe UI" FontSize="13" Placement="Bottom"
+                       KeyboardNavigation.TabNavigation="Cycle" AutomationProperties.Name="Appearance settings">
+            <ContextMenu.Template>
+              <ControlTemplate TargetType="ContextMenu">
+                <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                        BorderThickness="{TemplateBinding BorderThickness}" Padding="{TemplateBinding Padding}" CornerRadius="6">
+                  <ScrollViewer CanContentScroll="True" HorizontalScrollBarVisibility="Disabled"
+                                VerticalScrollBarVisibility="Auto" Focusable="False">
+                    <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Cycle"/>
+                  </ScrollViewer>
+                </Border>
+              </ControlTemplate>
+            </ContextMenu.Template>
+            <MenuItem x:Name="AppearanceAuto" Header="_Auto" Tag="Auto" IsCheckable="True"
+                      Style="{StaticResource AppearanceItemStyle}" AutomationProperties.AutomationId="AppearanceAuto" AutomationProperties.Name="Auto"
+                      ToolTip="Automatic: Acrylic locally when available; plain translucency in remote sessions"/>
+            <MenuItem x:Name="AppearanceAcrylic" Header="A_crylic" Tag="Acrylic" IsCheckable="True"
+                      Style="{StaticResource AppearanceItemStyle}" AutomationProperties.AutomationId="AppearanceAcrylic" AutomationProperties.Name="Acrylic"
+                      ToolTip="Request native Acrylic, even remotely. Windows may render it solid; unsupported APIs use plain translucency."/>
+            <MenuItem x:Name="AppearanceTranslucent" Header="_Translucent" Tag="Translucent" IsCheckable="True"
+                      Style="{StaticResource AppearanceItemStyle}" AutomationProperties.AutomationId="AppearanceTranslucent" AutomationProperties.Name="Translucent"
+                      ToolTip="Plain uniform translucency, including text and title bar; no blur"/>
+            <MenuItem x:Name="AppearanceSolid" Header="_Solid" Tag="Solid" IsCheckable="True"
+                      Style="{StaticResource AppearanceItemStyle}" AutomationProperties.AutomationId="AppearanceSolid" AutomationProperties.Name="Solid"
+                      ToolTip="Fully opaque dark appearance"/>
+            <Separator Background="#334156" Margin="8,4"/>
+            <MenuItem Style="{StaticResource AppearanceItemStyle}" StaysOpenOnClick="True" Focusable="False">
+              <MenuItem.Header>
+                <StackPanel Width="210">
+                  <TextBlock x:Name="OpacityLabel" Text="Translucent opacity: 90%" Margin="0,0,0,6"/>
+                  <Slider x:Name="AppearanceOpacity" Minimum="50" Maximum="100" Value="90"
+                          TickFrequency="1" IsSnapToTickEnabled="True" SmallChange="1" LargeChange="10"
+                          Foreground="#86E3D1" Background="#334156"
+                          AutomationProperties.Name="Translucent opacity percent"
+                          AutomationProperties.AutomationId="AppearanceOpacity"
+                          ToolTip="50–100%. Applies to plain translucency and automatic fallback, not Acrylic blur."/>
+                  <TextBlock Text="Tab to adjust; Esc to close" FontSize="11" Foreground="#91A0B5" Margin="0,5,0,0"/>
+                </StackPanel>
+              </MenuItem.Header>
+            </MenuItem>
+          </ContextMenu>
+        </Button.ContextMenu>
+      </Button>
       </StackPanel>
     </Grid>
     <Grid x:Name="SummaryCards" Grid.Row="1" Margin="0,0,0,18" Visibility="{DynamicResource DetailVisibility}">
