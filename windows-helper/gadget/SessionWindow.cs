@@ -6,14 +6,12 @@ using System.IO;
 using System.Globalization;
 using System.Linq;
 using System.Reflection;
-using System.Runtime.InteropServices;
 using System.Threading;
 using System.Web.Script.Serialization;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Data;
-using System.Windows.Interop;
 using System.Windows.Markup;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
@@ -119,8 +117,7 @@ namespace CopilotSessions
         public bool IsCompact { get; private set; }
         public int UnreadCount { get { return Rows.Count(row => row.Unread); } }
 
-        [DllImport("dwmapi.dll")]
-        private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
+        internal readonly WindowBackdrop Backdrop;
 
         public SessionWindow(string settingsPath = null)
         {
@@ -178,12 +175,7 @@ namespace CopilotSessions
             SetCompact(compact.IsChecked == true, false);
             compact.Checked += delegate { SetCompact(true); };
             compact.Unchecked += delegate { SetCompact(false); };
-            Window.SourceInitialized += delegate
-            {
-                int dark = 1;
-                // Cosmetic only: older Windows versions can reject this attribute.
-                DwmSetWindowAttribute(new WindowInteropHelper(Window).Handle, 20, ref dark, sizeof(int));
-            };
+            Backdrop = new WindowBackdrop(Window);
             Window.Closed += delegate { closed = true; };
         }
 

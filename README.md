@@ -93,6 +93,21 @@ Windows sessions with sessions in running WSL distributions. Each row shows its
 environment, title, short session ID, and status; selecting it shows the full ID,
 owner PID, and working directory.
 
+In local sessions on Windows 11 build 22621 or later, the window prefers native
+Desktop Acrylic: dark navy surfaces over a system-blurred backdrop, with opaque
+text and controls. Remote sessions deliberately use a predictable **plain
+translucency** fallback, also used when Acrylic is unsupported. This fallback is
+about 90% opaque (230/255), has **no blur**, and uniformly blends the entire window,
+including text and the standard title bar. It does not make the window click-through.
+Standard resizing, title-bar actions, and both layouts are preserved.
+
+High contrast or disabled Windows **Transparency effects** keeps the window fully
+opaque; unexpected native failures also restore the readable opaque appearance.
+The gadget observes appearance/session changes without changing system settings.
+Windows can suppress Acrylic according to activation, power, and hardware
+conditions: API support alone does not guarantee visible blur, and the remote
+fallback policy is not a claim that Acrylic never works over Remote Desktop.
+
 The custom terminal/checkmark icon is used for the app, taskbar, and installed
 desktop shortcut. Its multi-resolution assets are generated locally by
 `windows-helper/gadget/generate_icon.py`, without downloading third-party artwork.

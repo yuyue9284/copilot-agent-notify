@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Automation.Peers;
 using System.Windows.Automation.Provider;
@@ -11,6 +12,7 @@ using System.Windows.Controls.Primitives;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Input;
+using System.Windows.Interop;
 using System.Windows.Threading;
 using CopilotSessions;
 
@@ -71,6 +73,483 @@ public static class GadgetUiTests
         var encoder = new PngBitmapEncoder();
         encoder.Frames.Add(BitmapFrame.Create(bitmap));
         using (Stream output = File.Create(path)) encoder.Save(output);
+    }
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmGetWindowAttribute(IntPtr hwnd, int attribute, out int value, int size);
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmIsCompositionEnabled([MarshalAs(UnmanagedType.Bool)] out bool enabled);
+    [DllImport("user32.dll")]
+    private static extern IntPtr SendMessage(IntPtr hwnd, int message, IntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongW")]
+    private static extern int GetWindowLong(IntPtr hwnd, int index);
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool GetLayeredWindowAttributes(IntPtr hwnd, out uint color, out byte alpha, out uint flags);
+
+    private sealed class BackdropNative : IBackdropNative
+    {
+        internal int AttributeResult, FrameResult, OpacityResult, PreferenceResult, Calls, BackdropValue;
+        internal bool Composition = true, Transparency = true, Remote, Extended;
+        internal byte Alpha = 255;
+        public int EnsureTopmost(IntPtr hwnd, bool topmost) { Calls++; return 0; }
+        public int ReadPreferences(out bool transparency, out bool remote)
+        {
+            Calls++; transparency = Transparency; remote = Remote; return PreferenceResult;
+        }
+        public int SetOpacity(IntPtr hwnd, byte alpha)
+        {
+            Calls++;
+            if (alpha != 255 && OpacityResult != 0) return OpacityResult;
+            Alpha = alpha;
+            return 0;
+        }
+        public int IsCompositionEnabled(out bool enabled) { Calls++; enabled = Composition; return 0; }
+        public int SetAttribute(IntPtr hwnd, int attribute, int value)
+        {
+            Calls++;
+            if (attribute == 38) { BackdropValue = value; return AttributeResult; }
+            return 0;
+        }
+        public int ExtendFrame(IntPtr hwnd, bool enabled)
+        {
+            Calls++;
+            Extended = enabled;
+            return FrameResult;
+        }
+    }
+
+    private static void CheckOpaqueContent(SessionWindow app)
+    {
+        // WPF content remains opaque; Translucent mode applies uniform native alpha
+        // after composition, deliberately including text and the standard title bar.
+        Check(app.Window.Opacity == 1 && !app.Window.AllowsTransparency, "Do not use per-pixel WPF transparency");
+        Check(app.Window.WindowStyle == WindowStyle.SingleBorderWindow &&
+              app.Window.ResizeMode == ResizeMode.CanResize, "Keep the standard resizable frame");
+        foreach (UIElement element in Descendants<Control>(app.Window).Cast<UIElement>()
+            .Concat(Descendants<TextBlock>(app.Window)))
+        {
+            Check(element.Opacity == 1, "Glass must not lower control/text opacity: " + element.GetType().Name +
+                  "/" + (element is FrameworkElement ? ((FrameworkElement)element).Name : "") + "=" + element.Opacity);
+            for (DependencyObject parent = VisualTreeHelper.GetParent(element); parent != null;
+                 parent = VisualTreeHelper.GetParent(parent))
+                if (parent is UIElement)
+                    Check(((UIElement)parent).Opacity == 1, "A container fades its content");
+        }
+        foreach (Brush brush in Descendants<TextBlock>(app.Window).Select(text => text.Foreground)
+            .Concat(Descendants<Control>(app.Window).Select(control => control.Foreground)))
+        {
+            var solid = brush as SolidColorBrush;
+            Check(solid != null && solid.Color.A == 255 && solid.Opacity == 1, "Text foreground must be opaque");
+        }
+        foreach (SessionRow row in app.Rows)
+            Check(((Color)ColorConverter.ConvertFromString(row.StatusForeground)).A == 255,
+                  "Status color must remain opaque");
+    }
+
+    private static void CheckSolid(Window window)
+    {
+        Check(((SolidColorBrush)window.Background).Color == Color.FromRgb(16, 21, 29),
+              "Fallback must restore the existing dark window");
+        foreach (string key in new[] { "WindowSurface", "PanelSurface", "RowSurface", "HeaderSurface",
+                                       "HoverSurface", "SelectedSurface", "BusySurface", "AttentionSurface", "DoneSurface" })
+            Check(((SolidColorBrush)window.Resources[key]).Color.A == 255, "Fallback surface is translucent: " + key);
+        var source = HwndSource.FromHwnd(new WindowInteropHelper(window).Handle);
+        Check(source.CompositionTarget.BackgroundColor.A == 255, "Fallback compositor is transparent");
+    }
+
+    private static void CheckNativeAppearance(SessionWindow app)
+    {
+        IntPtr hwnd = new WindowInteropHelper(app.Window).Handle;
+        int style = GetWindowLong(hwnd, -20);
+        Check((style & 0x20) == 0, "Appearance must not introduce click-through");
+        if (app.Backdrop.Mode == WindowAppearance.Translucent)
+        {
+            uint color, flags;
+            byte alpha;
+            Check((style & 0x80000) != 0, "Uniform-alpha fallback lost its native layered style");
+            Check(GetLayeredWindowAttributes(hwnd, out color, out alpha, out flags) &&
+                  alpha == WindowBackdrop.FallbackAlpha && flags == 2, "Incorrect native fallback alpha");
+        }
+        else Check((style & 0x80000) == 0, "Opaque/Acrylic modes must restore normal composition");
+    }
+
+    private static void TestBackdrop(SessionWindow app)
+    {
+        CheckOpaqueContent(app);
+        CheckNativeAppearance(app);
+        WindowAppearance original = app.Backdrop.Mode;
+        bool enabled = app.Backdrop.IsEnabled;
+        int value;
+        int result = DwmGetWindowAttribute(new WindowInteropHelper(app.Window).Handle, 38, out value, sizeof(int));
+        bool composition;
+        object preference = Microsoft.Win32.Registry.GetValue(
+            @"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize", "EnableTransparency", 1);
+        bool effects = !SystemParameters.HighContrast && (preference == null || (preference is int && (int)preference != 0));
+        bool remote = GetSystemMetrics(0x1000) != 0;
+        if (effects && remote)
+            Check(original == WindowAppearance.Translucent, "Remote-session policy must select the visible fallback");
+        else if (effects && result == 0 && DwmIsCompositionEnabled(out composition) == 0 && composition)
+            Check(enabled, "Supported native Desktop Acrylic must be enabled");
+        else if (!effects) Check(original == WindowAppearance.Opaque, "User preference must disable all transparency");
+        Console.WriteLine("Native backdrop: HRESULT=0x{0:X8}, type={1}, mode={2}, highContrast={3}, remote={4}",
+                          result, value, original, SystemParameters.HighContrast, remote);
+        if (enabled)
+        {
+            Check(result == 0 && value == 3, "Desktop Acrylic attribute is not enabled");
+            Check(((SolidColorBrush)app.Window.Background).Color.A == 0, "WPF window blocks the backdrop");
+            Check(HwndSource.FromHwnd(new WindowInteropHelper(app.Window).Handle)
+                  .CompositionTarget.BackgroundColor.A == 0, "WPF compositor blocks the backdrop");
+            Check(((SolidColorBrush)app.Window.Resources["PanelSurface"]).Color.A < 255,
+                  "Opaque panel blocks the backdrop");
+        }
+        else CheckSolid(app.Window);
+        app.Backdrop.Refresh(true);
+        Check(app.Backdrop.Mode == WindowAppearance.Opaque, "High contrast must disable all effects");
+        CheckSolid(app.Window);
+        CheckOpaqueContent(app);
+        CheckNativeAppearance(app);
+        // Exercise the same deferred settings/composition path used by Windows, without changing any system settings.
+        foreach (int message in new[] { 0x001A, 0x031A, 0x031E })
+            SendMessage(new WindowInteropHelper(app.Window).Handle, message, IntPtr.Zero, IntPtr.Zero);
+        Pump();
+        Check(app.Backdrop.Mode == original, "Settings notification did not restore the appropriate appearance");
+        CheckNativeAppearance(app);
+        var pin = (ToggleButton)app.Window.FindName("Pin");
+        for (int cycle = 0; cycle < 30; cycle++)
+        {
+            if (cycle % 3 == 0)
+                SendMessage(new WindowInteropHelper(app.Window).Handle, 0x001A, IntPtr.Zero, IntPtr.Zero);
+            pin.IsChecked = true;
+            int beforeReset = GetWindowLong(new WindowInteropHelper(app.Window).Handle, -20);
+            Check(app.Window.Topmost && (beforeReset & 8) != 0, String.Format(
+                "Pin did not immediately update native topmost: cycle={0}, managed={1}, pin={2}, style=0x{3:X8}",
+                cycle, app.Window.Topmost, pin.IsChecked, beforeReset));
+            app.Backdrop.Refresh(true);
+            int afterReset = GetWindowLong(new WindowInteropHelper(app.Window).Handle, -20);
+            Check((afterReset & 8) != 0, String.Format(
+                "Opacity reset lost topmost: before=0x{0:X8}, after=0x{1:X8}, managed={2}, pin={3}",
+                beforeReset, afterReset, app.Window.Topmost, pin.IsChecked));
+            CheckNativeAppearance(app);
+            app.Backdrop.Refresh(SystemParameters.HighContrast);
+            Check((GetWindowLong(new WindowInteropHelper(app.Window).Handle, -20) & 8) != 0, "Opacity enable lost topmost");
+            CheckNativeAppearance(app);
+            pin.IsChecked = false;
+            Check((GetWindowLong(new WindowInteropHelper(app.Window).Handle, -20) & 8) == 0, "Unpin did not immediately clear native topmost");
+            Pump();
+            CheckNativeAppearance(app);
+            Check((GetWindowLong(new WindowInteropHelper(app.Window).Handle, -20) & 8) == 0, "Appearance prevents unpinning");
+        }
+        if (original == WindowAppearance.Translucent)
+        {
+            // Exercise a real Win32 reentrancy boundary, not a timer-dependent race:
+            // Pin changes after SetWindowLong has prepared its older style value.
+            bool changePin = true;
+            bool pinValue = true;
+            var source = HwndSource.FromHwnd(new WindowInteropHelper(app.Window).Handle);
+            HwndSourceHook reentrantPin = delegate(IntPtr hwnd, int message, IntPtr wp, IntPtr lp, ref bool handled)
+            {
+                if (changePin && message == 0x007C && wp.ToInt64() == -20)
+                {
+                    changePin = false;
+                    pin.IsChecked = pinValue;
+                }
+                return IntPtr.Zero;
+            };
+            source.AddHook(reentrantPin);
+            try
+            {
+                app.Backdrop.Refresh(true);
+                Check(!changePin && app.Window.Topmost, "Reentrant pin fixture did not run");
+                Check((GetWindowLong(source.Handle, -20) & 8) != 0, "In-flight opacity reset overwrote a new pin");
+                pinValue = false;
+                changePin = true;
+                app.Backdrop.Refresh(SystemParameters.HighContrast);
+                Check(!changePin && !app.Window.Topmost, "Reentrant unpin fixture did not run");
+                Check((GetWindowLong(source.Handle, -20) & 8) == 0, "In-flight opacity enable resurrected an old pin");
+                CheckNativeAppearance(app);
+            }
+            finally { source.RemoveHook(reentrantPin); pin.IsChecked = false; }
+        }
+        Console.WriteLine("Native topmost: 30 pin/appearance cycles passed; reentrant layered transitions={0}.",
+                          original == WindowAppearance.Translucent);
+        int chrome = GetWindowLong(new WindowInteropHelper(app.Window).Handle, -16);
+        Check((chrome & 0x00CF0000) == 0x00CF0000, "Native resize/caption/minimize/maximize/system-menu styles changed");
+        foreach (WindowState state in new[] { WindowState.Maximized, WindowState.Normal, WindowState.Minimized, WindowState.Normal })
+        {
+            app.Window.WindowState = state;
+            Pump();
+            Check(app.Window.WindowState == state, "Standard window state transition failed: requested=" +
+                  state + ", actual=" + app.Window.WindowState);
+            CheckNativeAppearance(app);
+        }
+        Point caption = app.Window.PointToScreen(new Point(80, -12));
+        long hitPoint = ((int)caption.X & 0xFFFF) | (((int)caption.Y & 0xFFFF) << 16);
+        Check(SendMessage(new WindowInteropHelper(app.Window).Handle, 0x0084, IntPtr.Zero, new IntPtr(hitPoint)).ToInt32() == 2,
+              "Standard title bar no longer supplies native dragging");
+
+        var native = new BackdropNative { AttributeResult = unchecked((int)0x80070057) };
+        var window = new Window { Width = 100, Height = 100, ShowInTaskbar = false };
+        var backdrop = new WindowBackdrop(window, native);
+        TextWriter previous = Console.Error;
+        var diagnostics = new StringWriter();
+        try
+        {
+            Console.SetError(diagnostics);
+            new WindowInteropHelper(window).EnsureHandle();
+            Check(backdrop.Mode == WindowAppearance.Translucent && native.Alpha == 230 && !native.Extended,
+                  "Unsupported Acrylic must choose plain translucency without extending the frame");
+            CheckSolid(window);
+            Check(diagnostics.ToString() == "", "Unsupported cosmetic attribute emitted a failure diagnostic");
+            native.AttributeResult = 0;
+            native.Transparency = false;
+            backdrop.Refresh(false);
+            Check(backdrop.Mode == WindowAppearance.Opaque && native.Alpha == 255, "Disabled effects must restore opaque alpha");
+            CheckSolid(window);
+            native.Transparency = true;
+            native.Remote = true;
+            backdrop.Refresh(false);
+            Check(backdrop.Mode == WindowAppearance.Translucent && native.Alpha == 230, "Remote fallback not selected");
+            backdrop.Refresh(true);
+            Check(backdrop.Mode == WindowAppearance.Opaque && native.Alpha == 255, "High contrast must win over remote policy");
+            native.OpacityResult = unchecked((int)0x80070057);
+            backdrop.Refresh(false);
+            Check(backdrop.Mode == WindowAppearance.Opaque && native.Alpha == 255, "Alpha API failure must stay opaque");
+            Check(diagnostics.ToString().Contains("set uniform alpha") && diagnostics.ToString().Contains("0x80070057"),
+                  "An invalid alpha call is a real failure, not unsupported Acrylic");
+            native.OpacityResult = 0;
+            native.PreferenceResult = unchecked((int)0x80070005);
+            backdrop.Refresh(false);
+            Check(backdrop.Mode == WindowAppearance.Opaque, "Unreadable user preference must fail closed");
+            native.PreferenceResult = 0;
+            native.Remote = false;
+            native.AttributeResult = unchecked((int)0x80004005);
+            backdrop.Refresh(false);
+            Check(backdrop.Mode == WindowAppearance.Opaque, "Unexpected Acrylic error must not silently select translucency");
+            native.AttributeResult = 0;
+            native.FrameResult = unchecked((int)0x80004005);
+            backdrop.Refresh(false);
+            Check(!backdrop.IsEnabled && native.BackdropValue == 1, "Failed extension must roll back the backdrop");
+            CheckSolid(window);
+            Check(diagnostics.ToString().Contains("0x80004005"), "Unexpected HRESULT needs a scoped diagnostic");
+            native.FrameResult = 0;
+            backdrop.Refresh(false);
+            Check(backdrop.IsEnabled, "Backdrop did not recover after native failure");
+            Check(native.Alpha == 255, "Acrylic must restore fully opaque native alpha");
+            native.Composition = false;
+            backdrop.Refresh(false);
+            Check(backdrop.Mode == WindowAppearance.Translucent && !native.Extended, "Composition loss must use unblurred fallback");
+            CheckSolid(window);
+            native.Composition = true;
+            backdrop.Refresh(false);
+            Check(backdrop.IsEnabled, "Composition recovery failed");
+            native.Remote = true;
+            backdrop.Refresh(false);
+            SendMessage(new WindowInteropHelper(window).Handle, 0x031E, IntPtr.Zero, IntPtr.Zero);
+            backdrop.Dispose();
+            Check(native.Alpha == 255 && backdrop.Mode == WindowAppearance.Opaque, "Dispose must restore normal composition");
+            CheckSolid(window);
+            SendMessage(new WindowInteropHelper(window).Handle, 0x031E, IntPtr.Zero, IntPtr.Zero);
+            window.Close();
+            int calls = native.Calls;
+            Pump();
+            backdrop.Refresh(false);
+            Check(native.Calls == calls, "Closed window retained backdrop callbacks");
+        }
+        finally
+        {
+            Console.SetError(previous);
+            window.Close();
+            backdrop.Dispose();
+        }
+        var disposableWindow = new Window { Width = 100, Height = 100, ShowInTaskbar = false };
+        var disposableBackdrop = new WindowBackdrop(disposableWindow);
+        try
+        {
+            IntPtr handle = new WindowInteropHelper(disposableWindow).EnsureHandle();
+            disposableBackdrop.Dispose();
+            Check((GetWindowLong(handle, -20) & 0x80000) == 0, "Disposing a live window left native alpha enabled");
+            CheckSolid(disposableWindow);
+        }
+        finally { disposableBackdrop.Dispose(); disposableWindow.Close(); }
+    }
+
+    private sealed class SyntheticBackdrop : FrameworkElement
+    {
+        internal bool Alternate;
+        protected override void OnRender(DrawingContext drawing)
+        {
+            // Only generated colors/patterns, never another application or desktop content.
+            for (int y = 0; y < ActualHeight; y += 12)
+                for (int x = 0; x < ActualWidth; x += 12)
+                {
+                    bool blue = (x >= ActualWidth / 2) != Alternate;
+                    bool light = (x / 12 + y / 12) % 2 == 0;
+                    Color color = blue
+                        ? (light ? Color.FromRgb(55, 182, 238) : Color.FromRgb(20, 81, 141))
+                        : (light ? Color.FromRgb(248, 179, 94) : Color.FromRgb(159, 54, 67));
+                    drawing.DrawRectangle(new SolidColorBrush(color), null, new Rect(x, y, 12, 12));
+                }
+        }
+    }
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetDC(IntPtr hwnd);
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")]
+    private static extern int GetSystemMetrics(int index);
+    [DllImport("user32.dll")]
+    private static extern int ReleaseDC(IntPtr hwnd, IntPtr dc);
+    [DllImport("gdi32.dll")]
+    private static extern IntPtr CreateCompatibleDC(IntPtr dc);
+    [DllImport("gdi32.dll")]
+    private static extern IntPtr CreateCompatibleBitmap(IntPtr dc, int width, int height);
+    [DllImport("gdi32.dll")]
+    private static extern IntPtr SelectObject(IntPtr dc, IntPtr obj);
+    [DllImport("gdi32.dll")]
+    private static extern bool BitBlt(IntPtr dest, int x, int y, int width, int height,
+                                       IntPtr src, int srcX, int srcY, int operation);
+    [DllImport("gdi32.dll")]
+    private static extern bool DeleteObject(IntPtr obj);
+    [DllImport("gdi32.dll")]
+    private static extern bool DeleteDC(IntPtr dc);
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmFlush();
+
+    private static void Settle()
+    {
+        var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(700) };
+        var frame = new DispatcherFrame();
+        timer.Tick += delegate { timer.Stop(); frame.Continue = false; };
+        timer.Start();
+        Dispatcher.PushFrame(frame);
+        DwmFlush();
+    }
+
+    private static BitmapSource CaptureScreen(Window background, string path)
+    {
+        Settle();
+        Point origin = background.PointToScreen(new Point(0, 0));
+        Point end = background.PointToScreen(new Point(background.ActualWidth, background.ActualHeight));
+        int width = (int)(end.X - origin.X), height = (int)(end.Y - origin.Y);
+        IntPtr screen = GetDC(IntPtr.Zero);
+        IntPtr memory = IntPtr.Zero, bitmap = IntPtr.Zero, previous = IntPtr.Zero;
+        try
+        {
+            Check(screen != IntPtr.Zero, "Cannot acquire screen capture DC");
+            memory = CreateCompatibleDC(screen);
+            bitmap = CreateCompatibleBitmap(screen, width, height);
+            Check(memory != IntPtr.Zero && bitmap != IntPtr.Zero, "Cannot allocate native capture");
+            previous = SelectObject(memory, bitmap);
+            Check(BitBlt(memory, 0, 0, width, height, screen, (int)origin.X, (int)origin.Y, 0x00CC0020),
+                  "Native screen capture failed");
+            BitmapSource image = Imaging.CreateBitmapSourceFromHBitmap(bitmap, IntPtr.Zero, Int32Rect.Empty,
+                                                                       BitmapSizeOptions.FromEmptyOptions());
+            var encoder = new PngBitmapEncoder();
+            encoder.Frames.Add(BitmapFrame.Create(image));
+            using (Stream output = File.Create(path)) encoder.Save(output);
+            return image;
+        }
+        finally
+        {
+            if (previous != IntPtr.Zero) SelectObject(memory, previous);
+            if (bitmap != IntPtr.Zero) DeleteObject(bitmap);
+            if (memory != IntPtr.Zero) DeleteDC(memory);
+            if (screen != IntPtr.Zero) ReleaseDC(IntPtr.Zero, screen);
+        }
+    }
+
+    private static double PixelDifference(BitmapSource first, BitmapSource second, Int32Rect region)
+    {
+        var a = new FormatConvertedBitmap(first, PixelFormats.Bgra32, null, 0);
+        var b = new FormatConvertedBitmap(second, PixelFormats.Bgra32, null, 0);
+        int stride = region.Width * 4;
+        byte[] left = new byte[stride * region.Height], right = new byte[left.Length];
+        a.CopyPixels(region, left, stride, 0);
+        b.CopyPixels(region, right, stride, 0);
+        double difference = 0;
+        for (int i = 0; i < left.Length; i++)
+            if (i % 4 != 3) difference += Math.Abs(left[i] - right[i]);
+        return difference / (region.Width * region.Height * 3);
+    }
+
+    private static void CaptureFrost(SessionWindow app)
+    {
+        string path = Environment.GetEnvironmentVariable("COPILOT_GADGET_FROST_SCREENSHOT");
+        if (String.IsNullOrEmpty(path)) return;
+        string stem = Path.Combine(Path.GetDirectoryName(path), Path.GetFileNameWithoutExtension(path));
+        var pattern = new SyntheticBackdrop();
+        Rect work = SystemParameters.WorkArea;
+        var background = new Window { WindowStyle = WindowStyle.None, ResizeMode = ResizeMode.NoResize,
+            WindowStartupLocation = WindowStartupLocation.Manual, Left = work.Left, Top = work.Top,
+            Width = Math.Min(1080, work.Width), Height = Math.Min(720, work.Height),
+            ShowInTaskbar = false, Topmost = true, Content = pattern };
+        double left = app.Window.Left, top = app.Window.Top, width = app.Window.Width, height = app.Window.Height;
+        bool pinned = app.Window.Topmost;
+        try
+        {
+            background.Show();
+            app.Window.Width = Math.Min(900, background.Width - 140);
+            app.Window.Height = Math.Min(530, background.Height - 160);
+            app.Window.Left = background.Left + 70;
+            app.Window.Top = background.Top + 80;
+            app.Window.Topmost = true;
+            bool activated = app.Window.Activate();
+            app.Sort(app.Grid.Columns[2], ListSortDirection.Ascending);
+            app.Grid.SelectedItem = app.Rows.Single(row => row.Status == "Needs input");
+            Pump();
+            BitmapSource first = CaptureScreen(background, path);
+            bool foreground = GetForegroundWindow() == new WindowInteropHelper(app.Window).Handle;
+            Console.WriteLine("Native visual capture: active={0}, foreground={1}, remoteSession={2}, mode={3}",
+                              activated && app.Window.IsActive,
+                              foreground, GetSystemMetrics(0x1000) != 0, app.Backdrop.Mode);
+            pattern.Alternate = true;
+            pattern.InvalidateVisual();
+            BitmapSource second = CaptureScreen(background, stem + "-alternate.png");
+            Point origin = background.PointToScreen(new Point());
+            Point gutter = app.Window.PointToScreen(new Point(8, 100));
+            double scale = PresentationSource.FromVisual(background).CompositionTarget.TransformToDevice.M11;
+            var region = new Int32Rect((int)(gutter.X - origin.X), (int)(gutter.Y - origin.Y),
+                                       Math.Max(1, (int)(4 * scale)), (int)(100 * scale));
+            double change = PixelDifference(first, second, region);
+            Console.WriteLine("Native visual capture: background-change mean RGB delta={0:F3} ({1}).", change,
+                              change > 1 ? "visible background response" : "solid material; blur not demonstrated");
+            WindowAppearance capturedMode = app.Backdrop.Mode;
+            if (capturedMode == WindowAppearance.Translucent)
+                Check(change > 3, "Plain-translucency fallback must visibly respond to the synthetic background");
+            app.Backdrop.Refresh(true);
+            BitmapSource solid = CaptureScreen(background, stem + "-opaque.png");
+            pattern.Alternate = false;
+            pattern.InvalidateVisual();
+            BitmapSource solidAlternate = CaptureScreen(background, stem + "-opaque-alternate.png");
+            double solidChange = PixelDifference(solid, solidAlternate, region);
+            Check(solidChange < 0.1,
+                  "Opaque fallback leaks the synthetic background");
+            File.WriteAllText(stem + "-measurements.txt", String.Format(
+                "Mode={0}\r\nNativeAlpha={1}\r\nRemoteSession={2}\r\nForeground={3}\r\nMeanRGBDelta={4:F6}\r\nOpaqueRGBDelta={5:F6}\r\n",
+                capturedMode, capturedMode == WindowAppearance.Translucent ? WindowBackdrop.FallbackAlpha : 255,
+                GetSystemMetrics(0x1000) != 0, foreground, change, solidChange));
+            app.Backdrop.Refresh(SystemParameters.HighContrast);
+            app.SetCompact(true, false);
+            Pump();
+            CheckNativeAppearance(app);
+            CaptureScreen(background, stem + "-compact.png");
+            app.SetCompact(false, false);
+            app.Window.Hide();
+            CaptureScreen(background, stem + "-background.png");
+        }
+        finally
+        {
+            app.Backdrop.Refresh(SystemParameters.HighContrast);
+            app.SetCompact(false, false);
+            app.Window.Left = left;
+            app.Window.Top = top;
+            app.Window.Width = width;
+            app.Window.Height = height;
+            app.Window.Topmost = pinned;
+            background.Close();
+            app.Window.Show();
+        }
     }
 
     private static void TestUnread(SessionWindow app)
@@ -326,6 +805,7 @@ public static class GadgetUiTests
             app.Apply(Sample());
             app.Window.Show();
             Pump();
+            TestBackdrop(app);
             Check(app.Window.Icon != null, "Missing application icon");
             foreach (DataGridColumn column in app.Grid.Columns)
             {
@@ -374,6 +854,7 @@ public static class GadgetUiTests
             TestForget(app, preferences);
             TestScrollbars(app);
             app.Apply(Sample());
+            CaptureFrost(app);
             string screenshot = Environment.GetEnvironmentVariable("COPILOT_GADGET_SCREENSHOT");
             if (!String.IsNullOrEmpty(screenshot)) Screenshot(app, screenshot);
             app.Window.Width = app.Window.MinWidth;
@@ -384,6 +865,7 @@ public static class GadgetUiTests
             compact.IsChecked = true;
             Pump();
             Check(app.IsCompact && app.Window.Width == 480 && app.Window.Height == 300, "Compact dimensions incorrect");
+            CheckOpaqueContent(app);
             Check(((FrameworkElement)app.Window.FindName("Forget")).IsVisible, "Forget missing from compact layout");
             Check(((FrameworkElement)app.Window.FindName("SummaryCards")).Visibility == Visibility.Collapsed,
                   "Compact layout should hide summary cards");

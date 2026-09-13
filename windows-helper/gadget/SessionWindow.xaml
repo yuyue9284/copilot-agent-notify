@@ -4,6 +4,17 @@
         WindowStartupLocation="CenterScreen" Background="#10151D" Foreground="#ECF1F7"
         FontFamily="Segoe UI" FontSize="13" UseLayoutRounding="True">
   <Window.Resources>
+    <SolidColorBrush x:Key="WindowSurface" Color="#10151D"/>
+    <SolidColorBrush x:Key="PanelSurface" Color="#161D28"/>
+    <SolidColorBrush x:Key="HeaderSurface" Color="#181F2B"/>
+    <SolidColorBrush x:Key="RowSurface" Color="#161D28"/>
+    <SolidColorBrush x:Key="HoverSurface" Color="#1C2838"/>
+    <SolidColorBrush x:Key="SelectedSurface" Color="#22364A"/>
+    <SolidColorBrush x:Key="SurfaceBorder" Color="#2A3545"/>
+    <SolidColorBrush x:Key="RowBorder" Color="#222D3C"/>
+    <SolidColorBrush x:Key="BusySurface" Color="#17283B"/>
+    <SolidColorBrush x:Key="AttentionSurface" Color="#30291E"/>
+    <SolidColorBrush x:Key="DoneSurface" Color="#1A302D"/>
     <Visibility x:Key="DetailVisibility">Visible</Visibility>
     <System:Double xmlns:System="clr-namespace:System;assembly=mscorlib" x:Key="SessionRowHeight">70</System:Double>
     <System:Double xmlns:System="clr-namespace:System;assembly=mscorlib"
@@ -38,7 +49,7 @@
                 <Setter TargetName="ThumbSurface" Property="Background" Value="#74D9C7"/>
               </Trigger>
               <Trigger Property="IsEnabled" Value="False">
-                <Setter TargetName="ThumbSurface" Property="Opacity" Value="0.35"/>
+                <Setter TargetName="ThumbSurface" Property="Background" Value="#293342"/>
               </Trigger>
             </ControlTemplate.Triggers>
           </ControlTemplate>
@@ -101,7 +112,7 @@
     </Style>
     <Style TargetType="DataGridColumnHeader">
       <Setter Property="Foreground" Value="#91A0B5"/>
-      <Setter Property="Background" Value="#181F2B"/>
+      <Setter Property="Background" Value="{DynamicResource HeaderSurface}"/>
       <Setter Property="Padding" Value="{DynamicResource HeaderPadding}"/>
       <Setter Property="FontSize" Value="11"/>
       <Setter Property="FontWeight" Value="SemiBold"/>
@@ -110,7 +121,7 @@
         <Setter.Value>
           <ControlTemplate TargetType="DataGridColumnHeader">
             <Border x:Name="Surface" Background="{TemplateBinding Background}"
-                    Padding="{TemplateBinding Padding}" BorderBrush="#263244" BorderThickness="0,0,0,1">
+                    Padding="{TemplateBinding Padding}" BorderBrush="{DynamicResource SurfaceBorder}" BorderThickness="0,0,0,1">
               <StackPanel Orientation="Horizontal">
                 <ContentPresenter VerticalAlignment="Center"/>
                 <TextBlock x:Name="Arrow" Text="" Margin="7,0,0,0" Foreground="#74D9C7"/>
@@ -149,17 +160,17 @@
       </Setter>
     </Style>
     <Style TargetType="DataGridRow">
-      <Setter Property="Background" Value="#161D28"/>
-      <Setter Property="BorderBrush" Value="#222D3C"/>
+      <Setter Property="Background" Value="{DynamicResource RowSurface}"/>
+      <Setter Property="BorderBrush" Value="{DynamicResource RowBorder}"/>
       <Setter Property="BorderThickness" Value="0,0,0,1"/>
       <Setter Property="MinHeight" Value="{DynamicResource SessionRowHeight}"/>
       <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
       <Style.Triggers>
         <Trigger Property="IsMouseOver" Value="True">
-          <Setter Property="Background" Value="#1C2838"/>
+          <Setter Property="Background" Value="{DynamicResource HoverSurface}"/>
         </Trigger>
         <Trigger Property="IsSelected" Value="True">
-          <Setter Property="Background" Value="#22364A"/>
+          <Setter Property="Background" Value="{DynamicResource SelectedSurface}"/>
           <Setter Property="BorderBrush" Value="#3F8D94"/>
         </Trigger>
       </Style.Triggers>
@@ -225,6 +236,7 @@
       </Setter>
     </Style>
   </Window.Resources>
+  <Border Background="{DynamicResource WindowSurface}">
   <Grid x:Name="RootLayout" Margin="24,20,24,16">
     <Grid.RowDefinitions>
       <RowDefinition Height="Auto"/>
@@ -260,27 +272,27 @@
       <Grid.ColumnDefinitions>
         <ColumnDefinition Width="*"/><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/>
       </Grid.ColumnDefinitions>
-      <Border Background="#17283B" CornerRadius="9" Padding="16,12" Margin="0,0,8,0">
+      <Border Background="{DynamicResource BusySurface}" CornerRadius="9" Padding="16,12" Margin="0,0,8,0">
         <StackPanel Orientation="Horizontal">
           <TextBlock x:Name="BusyCount" Text="0" FontSize="24" FontWeight="SemiBold" Foreground="#8EC5FF"/>
           <TextBlock Text="In progress" Foreground="#A7BED7" VerticalAlignment="Center" Margin="12,0,0,0"/>
         </StackPanel>
       </Border>
-      <Border Grid.Column="1" Background="#30291E" CornerRadius="9" Padding="16,12" Margin="4,0,4,0">
+      <Border Grid.Column="1" Background="{DynamicResource AttentionSurface}" CornerRadius="9" Padding="16,12" Margin="4,0,4,0">
         <StackPanel Orientation="Horizontal">
           <TextBlock x:Name="AttentionCount" Text="0" FontSize="24" FontWeight="SemiBold" Foreground="#F3CF87"/>
           <TextBlock Text="Needs input" Foreground="#CBB999" VerticalAlignment="Center" Margin="12,0,0,0"/>
         </StackPanel>
       </Border>
-      <Border Grid.Column="2" Background="#1A302D" CornerRadius="9" Padding="16,12" Margin="8,0,0,0">
+      <Border Grid.Column="2" Background="{DynamicResource DoneSurface}" CornerRadius="9" Padding="16,12" Margin="8,0,0,0">
         <StackPanel Orientation="Horizontal">
           <TextBlock x:Name="DoneCount" Text="0" FontSize="24" FontWeight="SemiBold" Foreground="#8CDBC0"/>
           <TextBlock Text="Done" Foreground="#A6C6BA" VerticalAlignment="Center" Margin="12,0,0,0"/>
         </StackPanel>
       </Border>
     </Grid>
-    <Border Grid.Row="2" CornerRadius="10" BorderBrush="#2A3545" BorderThickness="1"
-            Background="#161D28" ClipToBounds="True">
+    <Border Grid.Row="2" CornerRadius="10" BorderBrush="{DynamicResource SurfaceBorder}" BorderThickness="1"
+            Background="{DynamicResource PanelSurface}" ClipToBounds="True">
       <Grid>
         <DataGrid x:Name="Sessions" Background="Transparent" BorderThickness="0"
                   AutoGenerateColumns="False" CanUserAddRows="False" CanUserDeleteRows="False"
@@ -382,4 +394,5 @@
                  TextTrimming="CharacterEllipsis" FontSize="11"/>
     </Border>
   </Grid>
+  </Border>
 </Window>
