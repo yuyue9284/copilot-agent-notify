@@ -1,2 +1,4 @@
 __pycache__/
 tests/.runtime-*/
+windows-helper/gadget/bin/
+windows-helper/gadget/obj/

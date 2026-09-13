@@ -44,29 +44,48 @@ Restart Copilot CLI after installation. Use `copilot plugin list` or
 
 ## Desktop session gadget (Windows + WSL)
 
-Run `scripts\gadget.cmd` from Windows Explorer, or use Windows Python directly:
+Build the ready-to-run application explicitly from Windows PowerShell:
 
 ```powershell
-python scripts/session_gadget.py
+.\windows-helper\build-gadget.ps1
 ```
 
-To install a **Copilot Sessions** desktop shortcut and a self-contained script
-copy under `%LOCALAPPDATA%\CopilotAgentNotify\gadget`, run:
+This uses the installed .NET Framework MSBuild/C# toolchain, not a modern .NET
+SDK. Output is `windows-helper\gadget\bin\Release\CopilotSessions.exe`, its
+`.exe.config`, and the three shared Python collector files beside it. Rebuild
+after changing native or collector sources. Normal launch never compiles code.
+
+Run `scripts\gadget.cmd` from Windows Explorer, or launch the executable directly:
+
+```powershell
+.\windows-helper\gadget\bin\Release\CopilotSessions.exe --python C:\path\to\python.exe
+```
+
+`--python` selects an absolute native Windows Python 3.9+ executable. Without it,
+the native host attempts interpreter discovery and reports missing dependencies.
+`python scripts/session_gadget.py` remains a thin compatibility launcher that
+passes its interpreter to the prebuilt app; it does not monitor sessions or build
+the window.
+
+To install the prebuilt application and a **Copilot Sessions** desktop shortcut
+under `%LOCALAPPDATA%\CopilotAgentNotify\gadget`, run:
 
 ```powershell
 .\windows-helper\install-gadget.ps1
+# Optional explicit interpreter:
+.\windows-helper\install-gadget.ps1 -Python C:\path\to\python.exe
 ```
 
-This does not enable automatic startup. Re-run it after updating the repository
-to update the installed gadget. Close an open gadget before updating it. To
+The installer validates native Python 3.9+ and targets `CopilotSessions.exe`
+directly with `--python` in the shortcut. It preserves existing `gadget.json`,
+`gadget-ui.json`, `gadget-forgotten.json`, and owner caches.
+This does not enable automatic startup. Rebuild and reinstall after updating the
+repository. Close an open gadget before updating it. To
 uninstall, remove that gadget directory and the desktop shortcut. If your
-PowerShell policy prevents running the installer, use `gadget.cmd` instead;
-do not change the execution policy.
-
-For a window without an accompanying console, use `pythonw` instead of `python`.
-You can also create a shortcut targeting `pythonw.exe` with the full path to
-`scripts\session_gadget.py` as its argument. Keep the scripts and
-`windows-helper\gadget` sources together, or use the installer to copy them.
+PowerShell authorization blocks scripts on a WSL UNC path, use an approved local
+Windows checkout/build location or request administrator guidance; do not bypass
+or change execution policy. `gadget.cmd` can launch an already-built app but
+cannot replace the build step. The executable opens without a console window.
 
 The native C#/WPF window uses a consistent dark theme, status badges, summary
 cards, and directory subtitles. It has an **Always on top** toggle and combines native
@@ -171,13 +190,14 @@ ten seconds. Large transcripts can take several refreshes to load initially.
 
 Requirements and scope:
 
-- Windows Python 3.9+, .NET Framework 4.8 with its C# compiler and WPF assemblies,
+- Windows Python 3.9+, .NET Framework 4.8 with WPF assemblies,
   and `python3` 3.9+ in each running WSL distro. Tkinter is no longer required.
   No third-party Python packages, .NET SDK download, or browser runtime is needed.
-  First launch compiles the C#/XAML window using the local framework compiler into
-  `%LOCALAPPDATA%\CopilotAgentNotify\gadget-build`. Later launches reuse a
-  source-hashed build; changing the UI sources creates a new build automatically.
-  This cache can also be removed when uninstalling.
+  The explicit build additionally requires the installed Framework MSBuild/C#
+  tools. Windows Python remains required in this migration phase: only host
+  orchestration has moved to C#, not the shared discovery/reducer code.
+  Previous `gadget-build` runtime-compiler caches are no longer used; existing
+  preferences and owner caches retain their paths and semantics.
 - Discovery covers the signed-in Windows user's `~/.copilot` and each running
   distro's **default user's** `~/.copilot`. `COPILOT_HOME`, when set in the
   collector's environment, overrides the home for that OS. Shell-profile-only
@@ -199,8 +219,12 @@ Requirements and scope:
   by session identity, not PID. Closing one session does not remove its siblings;
   stale locks, missing transcripts, and explicitly shut-down sessions are excluded.
   Child work within a root transcript is included in that root's status.
-- The Python backend sends metadata snapshots to the native window through an
-  anonymous pipe and sends its read-only collector code over a local WSL pipe.
+- The native application owns typed snapshot validation, source aggregation,
+  monitoring, and collector process cancellation. It launches a Windows Python
+  collector and sends the same read-only Python collector code over local WSL pipes.
+  Each collector emits versioned NDJSON (`protocol_version: 1`, `sessions`,
+  `errors`). The shared Python scanner, activity reducer, and hooks are retained;
+  there is no Python parent feeding the WPF window during normal operation.
   Nothing needs installing into the distro, and stopped distros are not
   intentionally started. Closing the window stops its collectors.
 - The gadget does not modify transcripts, terminal titles, or notification
@@ -209,6 +233,10 @@ Requirements and scope:
 
 For native-only JSON diagnostics, run `python scripts/session_gadget.py --snapshot`.
 This reads one batch, so large transcripts may report `Loading`.
+`python scripts/session_probe.py --watch` streams collector snapshots; closing
+its stdin requests shutdown on Windows and Linux. The executable's
+`--collector-stdin` mode accepts the older `{rows, errors, discovering}` UI input
+only for compatibility and tests, not normal monitoring.
 
 ### Gadget regression tests
 
@@ -225,14 +253,17 @@ $env:PYTHONPATH = "tests"
 python -m unittest test_session_gadget -q
 ```
 
-The Windows suite compiles the actual WPF window and exercises header clicks,
+The Windows suite explicitly compiles all production C# sources into the
+`GadgetHostTests` and `GadgetUiTests` runners and exercises header clicks,
 live sorting, selection, compact layout persistence, unread badge transitions,
-and normal window closure while the backend awaits an update.
-Both platforms test collector cancellation before/during process creation, a
-blocked bootstrap pipe, and graceful EOF shutdown. Pipe shutdown regressions cover
-Windows `EINVAL` after peer exit without hiding real I/O errors or UI crashes.
-Lifecycle fixtures use local
-test processes, not real WSL sessions. Native UI tests briefly open test windows.
+and repeated normal window closure with an open collector pipe. The native host
+runner replaces the former Python source/configuration, worker lifecycle, and
+window-pipe tests: allowlists and discovery, stale/failed source recovery,
+cancellation before/during creation, blocked bootstrap, graceful EOF, and genuine
+I/O/process errors. Both platforms test the shared scanner/reducer, versioned
+watch protocol and EOF, injected WSL bootstrap, and prebuilt compatibility launch.
+Fixtures use isolated test homes/caches and local processes, not real user
+transcripts. Native UI tests briefly open test windows.
 The optional `COPILOT_GADGET_LIVE_TEST=1` check requires open Windows and WSL Copilot
 sessions and starts real read-only collectors; it is disabled by default.
 

@@ -23,24 +23,6 @@ using System.Windows.Threading;
 
 namespace CopilotSessions
 {
-    public sealed class SessionData
-    {
-        public string id { get; set; }
-        public string title { get; set; }
-        public string source { get; set; }
-        public string cwd { get; set; }
-        public string status { get; set; }
-        public string activity_revision { get; set; }
-        public int pid { get; set; }
-    }
-
-    public sealed class Snapshot
-    {
-        public SessionData[] rows { get; set; }
-        public string[] errors { get; set; }
-        public bool discovering { get; set; }
-    }
-
     public sealed class SessionRow : INotifyPropertyChanged
     {
         private SessionData data;
@@ -48,7 +30,7 @@ namespace CopilotSessions
         public bool Unread { get; private set; }
         public SessionRow(SessionData value, bool resurfaced = false)
         {
-            data = value;
+            data = value.Clone();
             working = value.status == "In progress" || value.status == "Needs input";
             Unread = resurfaced && value.status == "Done";
         }
@@ -103,7 +85,7 @@ namespace CopilotSessions
                 Unread = true;
                 working = false;
             }
-            data = value;
+            data = value.Clone();
             Notify();
         }
         private void Notify()
@@ -396,6 +378,7 @@ namespace CopilotSessions
                     || row.title == null || row.cwd == null
                     || !new[] { "In progress", "Needs input", "Done", "Loading", "Unknown" }.Contains(row.status))
                     throw new ArgumentException("Invalid collector session.");
+            snapshot = snapshot.Clone();
             lastUpdate = DateTime.UtcNow;
             latestSnapshot = snapshot;
             var incoming = new Dictionary<string, SessionData>();
@@ -503,10 +486,11 @@ namespace CopilotSessions
                 try
                 {
                     string line;
-                    var serializer = new JavaScriptSerializer { MaxJsonLength = 8 * 1024 * 1024 };
-                    while (!closed && (line = Console.ReadLine()) != null)
+                    while (!closed && (line = CollectorProcess.ReadLine(Console.In)) != null)
                     {
-                        Snapshot snapshot = serializer.Deserialize<Snapshot>(line);
+                        Snapshot snapshot;
+                        try { snapshot = SnapshotProtocol.ParseUi(line); }
+                        catch (ArgumentException error) { Report(error.Message); continue; }
                         Window.Dispatcher.Invoke(new Action(delegate
                         {
                             if (!closed) Apply(snapshot);
@@ -526,12 +510,9 @@ namespace CopilotSessions
         }
 
         [STAThread]
-        public static void Main()
+        public static int Main(string[] args)
         {
-            var app = new Application();
-            var window = new SessionWindow();
-            window.Window.Loaded += delegate { window.ReadCollector(); };
-            app.Run(window.Window);
+            return GadgetApplication.Run(args);
         }
     }
 }

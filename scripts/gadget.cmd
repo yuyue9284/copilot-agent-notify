@@ -1,8 +1,10 @@
 @echo off
-where py >nul 2>nul
-if not errorlevel 1 (
-    py -3 "%~dp0session_gadget.py"
-) else (
-    python "%~dp0session_gadget.py"
+setlocal
+set "gadget=%~dp0..\windows-helper\gadget\bin\Release\CopilotSessions.exe"
+if not exist "%gadget%" (
+    echo Copilot Sessions has not been built.
+    echo Run windows-helper\build-gadget.ps1 from Windows PowerShell, then retry.
+    echo Windows Python 3.9+ is also required.
+    exit /b 1
 )
-if errorlevel 1 pause
+start "" "%gadget%" %*

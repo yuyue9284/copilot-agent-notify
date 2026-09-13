@@ -1,7 +1,19 @@
-$ErrorActionPreference = "Stop"
+param([string]$Python)
 
-$probe = 'import sys; assert sys.version_info >= (3, 9); print(sys.executable)'
-if (Get-Command py -ErrorAction SilentlyContinue) {
+$ErrorActionPreference = "Stop"
+$source = Join-Path $PSScriptRoot "gadget\bin\Release"
+$files = @("CopilotSessions.exe", "CopilotSessions.exe.config",
+           "session_probe.py", "activity.py", "outer_progress.py")
+foreach ($name in $files) {
+    if (-not (Test-Path -LiteralPath (Join-Path $source $name))) {
+        throw "Missing prebuilt application file: $name. Run windows-helper\build-gadget.ps1 first."
+    }
+}
+
+$probe = "import os, sys; sys.exit('Windows Python 3.9+ is required') if os.name != 'nt' or sys.version_info < (3, 9) else print(sys.executable)"
+if ($Python) {
+    $python = & $Python -c $probe
+} elseif (Get-Command py -ErrorAction SilentlyContinue) {
     $python = & py -3 -c $probe
 } elseif (Get-Command python -ErrorAction SilentlyContinue) {
     $python = & python -c $probe
@@ -11,31 +23,27 @@ if (Get-Command py -ErrorAction SilentlyContinue) {
 if ($LASTEXITCODE -ne 0) {
     throw "Windows Python 3.9+ is required."
 }
-$pythonw = Join-Path (Split-Path $python.Trim()) "pythonw.exe"
-if (-not (Test-Path -LiteralPath $pythonw)) {
-    throw "pythonw.exe is missing from the Windows Python installation."
+$python = "$python".Trim()
+if (-not [IO.Path]::IsPathRooted($python) -or -not (Test-Path -LiteralPath $python -PathType Leaf)) {
+    throw "Python did not resolve to an absolute native Windows executable."
 }
 
-$source = Join-Path (Split-Path $PSScriptRoot) "scripts"
 $destination = Join-Path $env:LOCALAPPDATA "CopilotAgentNotify\gadget"
 New-Item -ItemType Directory -Path $destination -Force | Out-Null
-foreach ($name in @("session_gadget.py", "session_probe.py", "activity.py", "outer_progress.py")) {
+foreach ($name in $files) {
     Copy-Item -LiteralPath (Join-Path $source $name) -Destination (Join-Path $destination $name)
 }
-$ui = Join-Path $destination "gadget-ui"
-New-Item -ItemType Directory -Path $ui -Force | Out-Null
-foreach ($name in @("SessionWindow.cs", "SessionWindow.xaml", "app.manifest", "app.config",
-                   "sessions.ico", "sessions.png")) {
-    Copy-Item -LiteralPath (Join-Path $PSScriptRoot "gadget\$name") -Destination (Join-Path $ui $name)
-}
+# Replace the former Python host for users retaining its old launch path.
+Copy-Item -LiteralPath (Join-Path (Split-Path $PSScriptRoot) "scripts\session_gadget.py") `
+    -Destination (Join-Path $destination "session_gadget.py")
 
 $desktop = [Environment]::GetFolderPath("Desktop")
 $shell = New-Object -ComObject WScript.Shell
 $shortcut = $shell.CreateShortcut((Join-Path $desktop "Copilot Sessions.lnk"))
-$shortcut.TargetPath = $pythonw
-$shortcut.Arguments = '"' + (Join-Path $destination "session_gadget.py") + '"'
+$shortcut.TargetPath = Join-Path $destination "CopilotSessions.exe"
+$shortcut.Arguments = '--python "' + $python + '"'
 $shortcut.WorkingDirectory = $destination
-$shortcut.IconLocation = (Join-Path $ui "sessions.ico") + ",0"
+$shortcut.IconLocation = $shortcut.TargetPath + ",0"
 $shortcut.Description = "Live Copilot sessions from Windows and WSL"
 $shortcut.Save()
 Write-Host "Installed Copilot Sessions on your desktop. Double-click it to open the gadget."

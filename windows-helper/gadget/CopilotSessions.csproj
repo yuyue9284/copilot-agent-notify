@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <Configuration Condition=" '$(Configuration)' == '' ">Release</Configuration>
+    <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
+    <ProjectGuid>{7885C1E0-1A68-467C-96FC-CDBBA73AD032}</ProjectGuid>
+    <OutputType>WinExe</OutputType>
+    <RootNamespace>CopilotSessions</RootNamespace>
+    <AssemblyName>CopilotSessions</AssemblyName>
+    <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
+    <OutputPath>bin\$(Configuration)\</OutputPath>
+    <IntermediateOutputPath>obj\$(Configuration)\</IntermediateOutputPath>
+    <Optimize Condition=" '$(Configuration)' == 'Release' ">true</Optimize>
+    <DebugSymbols Condition=" '$(Configuration)' == 'Debug' ">true</DebugSymbols>
+    <ApplicationIcon>sessions.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <AppConfig>app.config</AppConfig>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="System" />
+    <Reference Include="System.Core" />
+    <Reference Include="System.Xml" />
+    <Reference Include="System.Xaml" />
+    <Reference Include="System.Web.Extensions" />
+    <Reference Include="WindowsBase" />
+    <Reference Include="PresentationCore" />
+    <Reference Include="PresentationFramework" />
+    <Compile Include="*.cs" />
+    <EmbeddedResource Include="SessionWindow.xaml">
+      <LogicalName>SessionWindow.xaml</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="sessions.png">
+      <LogicalName>sessions.png</LogicalName>
+    </EmbeddedResource>
+    <None Include="app.config" />
+    <None Include="app.manifest" />
+    <None Include="sessions.ico" />
+    <Content Include="..\..\scripts\session_probe.py;..\..\scripts\activity.py;..\..\scripts\outer_progress.py">
+      <Link>%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+</Project>

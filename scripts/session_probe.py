@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Read-only discovery of this OS user's live Copilot root sessions."""
 
+import argparse
+import errno
 import json
 import hashlib
 from datetime import datetime, timezone
 import os
 from pathlib import Path
-import select
 import sys
+import threading
 import time
 
 from activity import Activity, Transcript, atomic_json, process_token, read_json, state_directory
@@ -235,15 +237,87 @@ class Scanner:
         return {"sessions": sessions, "errors": errors}
 
 
+def write_pipe(descriptor, data):
+    if os.name != "nt":
+        return os.write(descriptor, data)
+    # CRT os.write maps both a disconnected pipe and invalid arguments to
+    # EINVAL. Preserve Win32's exact error rather than masking genuine failures.
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.WriteFile.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD,
+                                   ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p]
+    kernel32.WriteFile.restype = wintypes.BOOL
+    written = wintypes.DWORD()
+    buffer = ctypes.create_string_buffer(data)
+    if not kernel32.WriteFile(msvcrt.get_osfhandle(descriptor), buffer, len(data),
+                              ctypes.byref(written), None):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return written.value
+
+
 def watch():
-    """WSL worker: closing its input pipe ends it without a resident service."""
-    scanner = Scanner()
-    while True:
-        print(json.dumps(scanner.snapshot(), ensure_ascii=True), flush=True)
-        if select.select([sys.stdin], [], [], 2)[0]:
-            if not sys.stdin.readline():
-                return
+    """Stream versioned snapshots until the owning process closes stdin."""
+    stopped = threading.Event()
+    input_errors = []
+
+    def emit(snapshot):
+        payload = dict(snapshot, protocol_version=1)
+        data = (json.dumps(payload, ensure_ascii=True) + "\n").encode("utf-8")
+        # Raw descriptors work for Windows anonymous pipes and avoid buffered
+        # stream locks during interpreter shutdown with a blocked daemon reader.
+        while data:
+            written = write_pipe(sys.stdout.fileno(), data)
+            if not written:
+                raise OSError(errno.EIO, "Collector output made no progress")
+            data = data[written:]
+
+    def read_input(descriptor):
+        try:
+            while os.read(descriptor, 4096):
+                pass
+        except OSError as error:
+            input_errors.append("Collector input: " + str(error))
+        finally:
+            stopped.set()
+
+    try:
+        try:
+            descriptor = sys.stdin.fileno()
+            scanner = Scanner()
+        except (OSError, ValueError) as error:
+            emit({"sessions": [], "errors": ["Collector startup: " + str(error)]})
+            return 1
+        threading.Thread(target=read_input, args=(descriptor,), daemon=True).start()
+        while True:
+            try:
+                snapshot = scanner.snapshot()
+            except (OSError, ValueError) as error:
+                snapshot = {"sessions": [], "errors": ["Collector snapshot: " + str(error)]}
+            emit(snapshot)
+            if stopped.wait(2):
+                if input_errors:
+                    emit({"sessions": [], "errors": input_errors})
+                    return 1
+                return 0
+    except OSError as error:
+        if error.errno == errno.EPIPE or getattr(error, "winerror", None) in (109, 232):
+            return 0
+        print("Collector pipe failure: " + str(error), file=sys.stderr)
+        return 1
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--watch", action="store_true",
+                        help="Stream versioned NDJSON; close stdin to stop")
+    args = parser.parse_args()
+    if args.watch:
+        return watch()
+    print(json.dumps(Scanner().snapshot(), ensure_ascii=True))
+    return 0
 
 
 if __name__ == "__main__":
-    print(json.dumps(Scanner().snapshot(), ensure_ascii=True))
+    sys.exit(main())
