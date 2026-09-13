@@ -10,7 +10,7 @@ import select
 import sys
 import time
 
-from activity import Activity, Transcript, process_token
+from activity import Activity, Transcript, atomic_json, process_token, read_json, state_directory
 
 
 class ActivityRevision(Activity):
@@ -58,6 +58,13 @@ def started_at(token):
     raise OSError("Session discovery supports Windows and Linux only")
 
 
+def boot_identity():
+    if sys.platform.startswith("linux"):
+        return "linux:" + Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    # Windows process tokens are absolute creation FILETIMEs, not boot-relative ticks.
+    return sys.platform
+
+
 def workspace_name(path):
     """Read only the scalar name written by Copilot, not arbitrary YAML."""
     try:
@@ -80,32 +87,111 @@ class Scanner:
     def __init__(self, home=None):
         self.home = Path(home or os.environ.get("COPILOT_HOME") or Path.home() / ".copilot")
         self.readers = {}
+        self.cache_root = state_directory("").parent.parent
+        scope = hashlib.sha256(str(self.home.resolve()).encode("utf-8")).hexdigest()[:24]
+        self.identity_path = self.cache_root / "gadget-owners" / (scope + ".json")
+        self.identities = {}
+        self.identity_save_pending = False
+
+    def registered_owners(self, errors):
+        owners = set()
+        for path in (self.cache_root / "zellij").glob("*/registrations.json"):
+            try:
+                records = read_json(path, {})
+                if not isinstance(records, dict):
+                    raise ValueError("invalid activity registration file")
+                for record in records.values():
+                    if not isinstance(record, dict):
+                        raise ValueError("invalid activity registration")
+                    if (isinstance(record.get("session_id"), str)
+                            and isinstance(record.get("pid"), int)
+                            and isinstance(record.get("token"), str)
+                            and isinstance(record.get("transcript"), str)):
+                        owners.add((record["session_id"], record["pid"], record["token"],
+                                    str(Path(record["transcript"]).resolve())))
+            except (OSError, ValueError) as error:
+                errors.append("Owner registration %s: %s" % (path, error))
+        return owners
+
+    def cached_owners(self, errors):
+        try:
+            owners = read_json(self.identity_path, None)
+            if owners is None:
+                self.identity_save_pending = bool(self.identities)
+                return self.identities
+            if not isinstance(owners, dict) or any(
+                    not isinstance(value, dict) or not isinstance(value.get("token"), str)
+                    or not isinstance(value.get("boot"), str)
+                    or not isinstance(value.get("lock"), list) or len(value["lock"]) != 4
+                    or any(not isinstance(part, int) for part in value["lock"])
+                    for value in owners.values()):
+                raise ValueError("invalid process identity cache")
+            return owners
+        except (OSError, ValueError) as error:
+            errors.append("Process identity cache: " + str(error))
+            self.identity_save_pending = True
+            return self.identities
 
     def snapshot(self):
         sessions = []
         errors = []
         owners = {}
         tokens = {}
+        births = {}
+        boot = boot_identity()
+        cached = self.cached_owners(errors)
+        retained = {}
+        registered = None
         state = self.home / "session-state"
         # A CLI can own several root sessions concurrently. Locks establish
         # liveness, not session identity; only deduplicate owners of the same root.
         for lock in state.glob("*/inuse.*.lock"):
             try:
                 pid = int(lock.name.split(".")[1])
+                stat = lock.stat()
+                fingerprint = [stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_ctime_ns]
+                identity_key = lock.parent.name + "/" + str(pid)
+                known = cached.get(identity_key)
+                if known and known["lock"] == fingerprint:
+                    # Retain a rejected identity while its old lock exists, so a
+                    # later poll cannot accidentally re-adopt a recycled PID.
+                    retained[identity_key] = known
                 if pid not in tokens:
-                    token = process_token(pid)
-                    tokens[pid] = (token, started_at(token)) if token else (None, 0)
-                token, born = tokens[pid]
-                stamp = lock.stat().st_mtime
-                if not token or stamp + 2 < born:
+                    tokens[pid] = process_token(pid)
+                token = tokens[pid]
+                if not token:
                     continue
-                if not (lock.parent / "events.jsonl").is_file():
+                transcript = lock.parent / "events.jsonl"
+                if not transcript.is_file():
                     continue
+                if known and known["lock"] == fingerprint:
+                    if known["token"] != token or known["boot"] != boot:
+                        continue
+                else:
+                    if pid not in births:
+                        births[pid] = started_at(token)
+                    if stat.st_mtime + 2 < births[pid]:
+                        # An already-verified hook registration can recover an
+                        # owner first seen by this scanner after a WSL clock shift.
+                        if registered is None:
+                            registered = self.registered_owners(errors)
+                        if (lock.parent.name, pid, token, str(transcript.resolve())) not in registered:
+                            continue
+                retained[identity_key] = {"token": token, "boot": boot, "lock": fingerprint}
                 owners.setdefault(lock.parent, []).append((pid, token))
             except FileNotFoundError:
                 continue
             except (OSError, ValueError) as error:
                 errors.append("%s: %s" % (lock.parent.name, error))
+        if retained != cached or self.identity_save_pending:
+            try:
+                self.identity_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                atomic_json(self.identity_path, retained)
+                self.identity_save_pending = False
+            except OSError as error:
+                self.identity_save_pending = True
+                errors.append("Cannot save process identities: " + str(error))
+        self.identities = retained
         keep = set()
         for directory, candidates in sorted(owners.items()):
             session_id = directory.name

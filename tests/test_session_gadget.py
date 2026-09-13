@@ -1,5 +1,6 @@
 import json
 import io
+import errno
 import os
 from pathlib import Path
 import queue
@@ -9,7 +10,8 @@ import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,6 +29,9 @@ class ScannerTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.home = Path(self.temp.name)
+        cache = patch.object(probe, "state_directory", return_value=self.home / "cache" / "zellij" / "test")
+        cache.start()
+        self.addCleanup(cache.stop)
         self.scanner = probe.Scanner(self.home)
         self.token = patch.object(probe, "process_token", return_value="identity")
         self.token.start()
@@ -75,6 +80,78 @@ class ScannerTests(unittest.TestCase):
         directory = self.session()
         os.utime(directory / "inuse.42.lock", (1, 1))
         self.assertEqual(self.scanner.snapshot()["sessions"], [])
+
+    def test_verified_identity_survives_clock_shift_and_scanner_restart(self):
+        self.session(events=[event("assistant.turn_start")])
+        self.assertEqual(self.status(), "In progress")
+        with patch.object(probe, "started_at", return_value=time.time() + 6 * 3600) as estimate:
+            self.assertEqual(self.status(), "In progress")
+            self.assertEqual(probe.Scanner(self.home).snapshot()["sessions"][0]["status"], "In progress")
+            estimate.assert_not_called()
+
+    def test_cached_identity_rejects_reused_pid_even_with_misleading_clock(self):
+        self.session()
+        self.assertEqual(self.status(), "Done")
+        with patch.object(probe, "process_token", return_value="another-process"), \
+                patch.object(probe, "started_at", return_value=0):
+            for scanner in (self.scanner, probe.Scanner(self.home), probe.Scanner(self.home)):
+                self.assertEqual(scanner.snapshot()["sessions"], [])
+
+    def test_previous_boot_identity_cannot_adopt_old_lock(self):
+        self.session()
+        with patch.object(probe, "boot_identity", return_value="first-boot"):
+            self.assertEqual(self.status(), "Done")
+        with patch.object(probe, "boot_identity", return_value="second-boot"), \
+                patch.object(probe, "started_at", return_value=0):
+            self.assertEqual(probe.Scanner(self.home).snapshot()["sessions"], [])
+            self.assertEqual(probe.Scanner(self.home).snapshot()["sessions"], [])
+
+    def registration(self, directory, token="identity", session_id=None, transcript=None):
+        path = self.home / "cache" / "zellij" / "test" / "registrations.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"registered": {
+            "session_id": session_id or directory.name, "pid": 42, "token": token,
+            "transcript": str(transcript or directory / "events.jsonl"),
+        }}))
+        return path
+
+    def test_registration_recovers_first_scan_after_clock_shift(self):
+        directory = self.session(events=[event("assistant.turn_start")])
+        registration = self.registration(directory)
+        with patch.object(probe, "started_at", return_value=time.time() + 6 * 3600):
+            self.assertEqual(self.status(), "In progress")
+            registration.unlink()
+            self.assertEqual(probe.Scanner(self.home).snapshot()["sessions"][0]["status"], "In progress")
+
+    def test_registration_must_match_session_path_and_process_identity(self):
+        directory = self.session()
+        with patch.object(probe, "started_at", return_value=time.time() + 6 * 3600):
+            for overrides in ({"token": "different"}, {"session_id": "another"},
+                              {"transcript": self.home / "other" / "events.jsonl"}):
+                self.registration(directory, **overrides)
+                self.assertEqual(self.scanner.snapshot()["sessions"], [])
+
+    def test_rewritten_lock_is_not_trusted_from_previous_cache_entry(self):
+        directory = self.session()
+        self.assertEqual(self.status(), "Done")
+        lock = directory / "inuse.42.lock"
+        os.utime(lock, (1, 1))
+        with patch.object(probe, "started_at", return_value=time.time() + 6 * 3600):
+            self.assertEqual(self.scanner.snapshot()["sessions"], [])
+
+    def test_identity_cache_errors_are_reported_without_hiding_verified_live_rows(self):
+        self.session()
+        with patch.object(probe, "atomic_json", side_effect=PermissionError("read-only cache")):
+            snapshot = self.scanner.snapshot()
+            self.assertEqual(len(snapshot["sessions"]), 1)
+            self.assertTrue(any("Cannot save process identities" in error for error in snapshot["errors"]))
+            with patch.object(probe, "started_at", return_value=time.time() + 6 * 3600):
+                self.assertEqual(len(self.scanner.snapshot()["sessions"]), 1)
+        self.scanner.identity_path.parent.mkdir(parents=True, exist_ok=True)
+        self.scanner.identity_path.write_text('{"root/42": false}')
+        snapshot = self.scanner.snapshot()
+        self.assertEqual(len(snapshot["sessions"]), 1)
+        self.assertTrue(any("invalid process identity cache" in error for error in snapshot["errors"]))
 
     def test_same_process_keeps_all_root_sessions_and_ignores_empty_launch(self):
         old = self.session("old")
@@ -563,8 +640,189 @@ class WorkerLifecycleTests(unittest.TestCase):
                 worker.thread.join(5)
 
 
+class WindowPipeTests(unittest.TestCase):
+    def test_only_expected_disconnected_pipe_errors_are_accepted(self):
+        process = Mock()
+        process.wait.return_value = 0
+        with patch.object(gadget, "os", SimpleNamespace(name="nt")):
+            self.assertTrue(gadget.closed_process_pipe(process, OSError(errno.EINVAL, "closed pipe")))
+            self.assertFalse(gadget.closed_process_pipe(process, OSError(errno.EIO, "I/O failure")))
+            process.wait.side_effect = subprocess.TimeoutExpired("window", .5)
+            self.assertFalse(gadget.closed_process_pipe(process, OSError(errno.EINVAL, "still alive")))
+        with patch.object(gadget, "os", SimpleNamespace(name="posix")):
+            self.assertFalse(gadget.closed_process_pipe(process, OSError(errno.EINVAL, "invalid argument")))
+            self.assertTrue(gadget.closed_process_pipe(process, BrokenPipeError()))
+
+    def run_race(self, failure_stage, error_number=errno.EINVAL, exit_code=0, alive=False):
+        window = Mock()
+        window.returncode = None
+        window.poll.side_effect = lambda: window.returncode
+        monitor = Mock()
+        monitor.updates = queue.Queue()
+        monitor.updates.put(("Windows", {"sessions": [], "errors": []}, time.monotonic()))
+
+        def fail(*args):
+            if not alive:
+                window.returncode = exit_code
+            raise OSError(error_number, "pipe operation failed")
+
+        def wait(timeout=None):
+            if alive and timeout == .5:
+                raise subprocess.TimeoutExpired("window", timeout)
+            window.returncode = exit_code
+            return exit_code
+
+        window.wait.side_effect = wait
+        getattr(window.stdin, failure_stage).side_effect = fail
+        # A failed buffered flush is retried by close(), matching Windows Python.
+        if failure_stage == "flush":
+            window.stdin.close.side_effect = fail
+        if failure_stage == "close":
+            window.poll.side_effect = [None, 0]
+
+        with patch.object(gadget, "os", SimpleNamespace(name="nt")), \
+                patch.object(gadget, "hidden_options", return_value={}), \
+                patch.object(gadget, "load_config", return_value={"wsl_distros": []}), \
+                patch.object(gadget, "build_window", return_value="test-window"), \
+                patch.object(gadget, "Monitor", return_value=monitor), \
+                patch.object(gadget.subprocess, "Popen", return_value=window):
+            try:
+                gadget.run_window()
+            finally:
+                monitor.close.assert_called_once()
+                monitor.thread.join.assert_called_once_with(timeout=20)
+                window.stdin.close.assert_called_once()
+                self.assertIn(unittest.mock.call(timeout=5), window.wait.call_args_list)
+
+    def test_windows_exit_races_in_write_flush_and_close_are_clean(self):
+        for stage in ("write", "flush", "close"):
+            with self.subTest(stage=stage):
+                self.run_race(stage)
+
+    def test_real_io_errors_are_not_hidden_and_still_run_cleanup(self):
+        for stage in ("write", "flush", "close"):
+            with self.subTest(stage=stage):
+                with self.assertRaises(OSError) as caught:
+                    self.run_race(stage, error_number=errno.EIO)
+                self.assertEqual(caught.exception.errno, errno.EIO)
+
+    def test_invalid_argument_with_live_receiver_is_not_hidden(self):
+        with self.assertRaises(OSError) as caught:
+            self.run_race("flush", alive=True)
+        self.assertEqual(caught.exception.errno, errno.EINVAL)
+
+    def test_nonzero_window_exit_remains_an_error(self):
+        with self.assertRaisesRegex(OSError, "Desktop window exited with code 17"):
+            self.run_race("flush", exit_code=17)
+
+    def test_worker_close_accepts_windows_peer_exit(self):
+        worker = gadget.WslWorker("test", queue.Queue())
+        worker.process = Mock()
+        worker.process.stdin.closed = False
+        worker.process.stdin.close.side_effect = OSError(errno.EINVAL, "closed pipe")
+        worker.process.wait.return_value = 0
+        worker.bootstrap_sent.set()
+        with patch.object(gadget, "os", SimpleNamespace(name="nt")):
+            worker.close()
+        self.assertTrue(worker.stopping.is_set())
+        worker.process.wait.assert_any_call(timeout=3)
+        worker.process.terminate.assert_not_called()
+
+    def test_failed_worker_cleanup_preserves_collector_error(self):
+        worker = gadget.WslWorker("test", queue.Queue())
+        process = Mock()
+        process.poll.return_value = 0
+        process.wait.return_value = 0
+        process.stdin.write.side_effect = OSError(errno.EINVAL, "closed pipe")
+        process.stdin.close.side_effect = OSError(errno.EINVAL, "closed pipe")
+        process.stdout = io.BytesIO()
+        process.stderr = io.BytesIO()
+        with patch.object(gadget, "os", SimpleNamespace(name="nt")), \
+                patch.object(gadget, "hidden_options", return_value={}), \
+                patch.object(gadget.subprocess, "Popen", return_value=process):
+            worker.run()
+        self.assertTrue(process.stdout.closed)
+        self.assertTrue(process.stderr.closed)
+        self.assertIn("closed pipe", worker.updates.get_nowait()[1]["errors"][0])
+        self.assertTrue(worker.updates.empty())
+
+
 @unittest.skipUnless(os.name == "nt", "Native Windows gadget UI")
 class WindowTests(unittest.TestCase):
+    def test_window_close_during_update_exits_backend_cleanly(self):
+        import ctypes
+        from ctypes import wintypes
+
+        executable = gadget.build_window()
+        monitor = gadget.Monitor(wsl_distros=[])
+        monitor.thread = threading.Thread(target=lambda: None)
+        launched = threading.Event()
+        created = []
+        close_errors = []
+        original_popen = subprocess.Popen
+
+        def launch(*args, **kwargs):
+            process = original_popen(*args, **kwargs)
+            created.append(process)
+            launched.set()
+            return process
+
+        def close_window():
+            try:
+                if not launched.wait(10):
+                    raise AssertionError("Native window was not launched")
+                user32 = ctypes.WinDLL("user32", use_last_error=True)
+                callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+                user32.EnumWindows.argtypes = [callback_type, wintypes.LPARAM]
+                user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+                user32.IsWindowVisible.argtypes = [wintypes.HWND]
+                user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+                handles = []
+
+                @callback_type
+                def find_window(hwnd, _):
+                    owner = wintypes.DWORD()
+                    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+                    if owner.value == created[0].pid and user32.IsWindowVisible(hwnd):
+                        handles.append(hwnd)
+                    return True
+
+                deadline = time.monotonic() + 10
+                while not handles and time.monotonic() < deadline:
+                    user32.EnumWindows(find_window, 0)
+                    time.sleep(.02)
+                if not handles or not user32.PostMessageW(handles[0], 0x10, 0, 0):  # WM_CLOSE
+                    raise AssertionError("Could not request native window closure")
+                created[0].wait(timeout=10)
+                # Deliver an update after WM_CLOSE while run_window is awaiting
+                # its queue: reproduces the real Windows broken-pipe race.
+                monitor.updates.put(("Windows", {"sessions": [], "errors": []}, time.monotonic()))
+            except (AssertionError, OSError, subprocess.TimeoutExpired) as error:
+                close_errors.append(error)
+                for process in created:
+                    if process.poll() is None:
+                        process.kill()
+
+        closer = threading.Thread(target=close_window, daemon=True)
+        with patch.object(gadget, "load_config", return_value={"wsl_distros": []}), \
+                patch.object(gadget, "build_window", return_value=executable), \
+                patch.object(gadget, "Monitor", return_value=monitor), \
+                patch.object(gadget.subprocess, "Popen", side_effect=launch):
+            closer.start()
+            try:
+                gadget.run_window()
+            finally:
+                closer.join(timeout=20)
+                for process in created:
+                    if process.poll() is None:
+                        process.kill()
+                    process.wait(timeout=5)
+        self.assertFalse(closer.is_alive())
+        self.assertEqual(close_errors, [])
+        self.assertTrue(monitor.stop.is_set())
+        self.assertTrue(created[0].stdin.closed)
+        self.assertEqual(created[0].returncode, 0)
+
     @unittest.skipUnless(os.environ.get("COPILOT_GADGET_LIVE_TEST") == "1",
                          "Opt-in: requires live Windows and WSL Copilot sessions")
     def test_live_windows_and_wsl_feed_and_shutdown(self):

@@ -2,6 +2,7 @@
 """Windows desktop view of native and WSL Copilot session activity."""
 
 import argparse
+import errno
 import hashlib
 import json
 import os
@@ -145,8 +146,9 @@ class WslWorker:
             if self.process is not None:
                 try:
                     self.process.stdin.close()
-                except BrokenPipeError:
-                    pass
+                except OSError as error:
+                    if not closed_process_pipe(self.process, error):
+                        raise
                 self.process.stdout.close()
             if error_thread is not None:
                 error_thread.join(timeout=3)
@@ -161,8 +163,9 @@ class WslWorker:
                 if self.bootstrap_sent.is_set() and not process.stdin.closed:
                     try:
                         process.stdin.close()
-                    except BrokenPipeError:
-                        pass
+                    except OSError as error:
+                        if not closed_process_pipe(process, error):
+                            raise
                 elif process.poll() is None:
                     # Buffered stdin.close() can wait forever for an in-flight
                     # bootstrap write. Terminate first; the writer owns cleanup.
@@ -306,6 +309,20 @@ def merge_update(sources, source, snapshot, stamp):
         sources[source] = (snapshot, stamp)
 
 
+def closed_process_pipe(process, error):
+    if isinstance(error, BrokenPipeError):
+        return True
+    # Windows' buffered pipe writer can map a closed reader to EINVAL instead
+    # of EPIPE. Only accept it when the receiving process has actually exited.
+    if os.name == "nt" and error.errno == errno.EINVAL:
+        try:
+            process.wait(timeout=.5)
+            return True
+        except subprocess.TimeoutExpired:
+            return False
+    return False
+
+
 def run_window():
     config = load_config()
     executable = build_window()
@@ -323,25 +340,33 @@ def run_window():
                     merge_update(sources, *monitor.updates.get_nowait())
             except queue.Empty:
                 pass
+            if window.poll() is not None:
+                break
             rows, errors = display_snapshot(sources, time.monotonic())
             payload = {"rows": rows, "errors": errors, "discovering": not sources}
             try:
                 window.stdin.write((json.dumps(payload, ensure_ascii=True) + "\n").encode("utf-8"))
                 window.stdin.flush()
-            except BrokenPipeError:
-                break
+            except OSError as error:
+                if closed_process_pipe(window, error):
+                    break
+                raise
     finally:
         monitor.close()
         try:
-            window.stdin.close()
-        except BrokenPipeError:
-            pass
-        monitor.thread.join(timeout=20)
-        try:
-            window.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            window.terminate()
-            window.wait(timeout=5)
+            try:
+                window.stdin.close()
+            except OSError as error:
+                if not closed_process_pipe(window, error):
+                    raise
+        finally:
+            # Pipe cleanup errors must not bypass collector shutdown or reaping.
+            monitor.thread.join(timeout=20)
+            try:
+                window.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                window.terminate()
+                window.wait(timeout=5)
     if window.returncode:
         raise OSError("Desktop window exited with code %s" % window.returncode)
 

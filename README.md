@@ -184,7 +184,16 @@ Requirements and scope:
   variables are not loaded by the WSL collector. Other OS users and custom homes
   not configured in that environment are outside the discovery scope.
 - Zellij and the notification hooks are not required. Live `inuse.PID.lock`
-  files identify owners; process start times reject locks from recycled PIDs.
+  files identify owners. Once verified, the scanner caches the process start
+  token and lock-file identity; Linux entries also include the boot ID.
+  This keeps live sessions visible across WSL clock shifts without trusting a
+  reused PID or a lock from an earlier boot. Existing exact-match activity-hook
+  registrations can recover sessions first discovered after a clock shift.
+  Previously unseen locks without that evidence still require the initial
+  process-start timestamp check; the scanner does not blindly adopt old locks.
+  The metadata-only cache lives under `gadget-owners` in the OS-local notification
+  state directory (`~/.cache/copilot-agent-notify` by default on WSL,
+  `%LOCALAPPDATA%\CopilotAgentNotify` on Windows). Cache errors are reported.
   Each live-owned root transcript has its own row, even when several sessions
   share one CLI process. Multiple owners of the same session are deduplicated
   by session identity, not PID. Closing one session does not remove its siblings;
@@ -217,9 +226,12 @@ python -m unittest test_session_gadget -q
 ```
 
 The Windows suite compiles the actual WPF window and exercises header clicks,
-live sorting, selection, compact layout persistence, and unread badge transitions.
+live sorting, selection, compact layout persistence, unread badge transitions,
+and normal window closure while the backend awaits an update.
 Both platforms test collector cancellation before/during process creation, a
-blocked bootstrap pipe, and graceful EOF shutdown. Lifecycle fixtures use local
+blocked bootstrap pipe, and graceful EOF shutdown. Pipe shutdown regressions cover
+Windows `EINVAL` after peer exit without hiding real I/O errors or UI crashes.
+Lifecycle fixtures use local
 test processes, not real WSL sessions. Native UI tests briefly open test windows.
 The optional `COPILOT_GADGET_LIVE_TEST=1` check requires open Windows and WSL Copilot
 sessions and starts real read-only collectors; it is disabled by default.
