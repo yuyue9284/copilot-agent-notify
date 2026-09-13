@@ -89,6 +89,16 @@ public static class GadgetUiTests
     private static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int width, int height, uint flags);
     [DllImport("user32.dll")]
     private static extern IntPtr GetWindow(IntPtr hwnd, uint command);
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetFocus();
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint process);
+    [DllImport("kernel32.dll")]
+    private static extern uint GetCurrentProcessId();
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr OpenInputDesktop(uint flags, bool inherit, uint access);
+    [DllImport("user32.dll")]
+    private static extern bool CloseDesktop(IntPtr desktop);
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool PostMessage(IntPtr hwnd, int message, IntPtr wparam, IntPtr lparam);
 
@@ -546,6 +556,40 @@ public static class GadgetUiTests
         Pump();
     }
 
+    private static string AppearanceFocusState(SessionWindow app)
+    {
+        var menu = ((Button)app.Window.FindName("AppearanceButton")).ContextMenu;
+        var slider = (Slider)app.Window.FindName("AppearanceOpacity");
+        var focus = Keyboard.FocusedElement as FrameworkElement;
+        var hover = Mouse.DirectlyOver as FrameworkElement;
+        var popup = PresentationSource.FromVisual(menu) as HwndSource;
+        IntPtr foreground = GetForegroundWindow();
+        uint process;
+        GetWindowThreadProcessId(foreground, out process);
+        return String.Format("focus={0}/{1}; hover={2}/{3}; active={4}; menuOpen={5}; popupSource={6}; popupForeground={7}; sliderFocus={8}; rootForeground={9}; nativeFocusRoot={10}; nativeFocusPopup={11}; foregroundOtherProcess={12}; foregroundZero={13}",
+            focus == null ? "null" : focus.GetType().Name, focus == null ? "" : focus.Name,
+            hover == null ? "null" : hover.GetType().Name, hover == null ? "" : hover.Name,
+            app.Window.IsActive, menu.IsOpen, popup != null,
+            popup != null && GetForegroundWindow() == popup.Handle, slider.IsKeyboardFocusWithin,
+            GetForegroundWindow() == new WindowInteropHelper(app.Window).Handle,
+            GetFocus() == new WindowInteropHelper(app.Window).Handle, popup != null && GetFocus() == popup.Handle,
+            foreground != IntPtr.Zero && process != GetCurrentProcessId(), foreground == IntPtr.Zero);
+    }
+
+    private static void RequireKeyboardFixture(SessionWindow app)
+    {
+        IntPtr desktop = OpenInputDesktop(0, false, 1); // DESKTOP_READOBJECTS; no desktop/session changes.
+        int error = Marshal.GetLastWin32Error();
+        Check(desktop != IntPtr.Zero, "Native keyboard tests require an active, unlocked input desktop. " +
+              "OpenInputDesktop failed (" + error + "); reconnect/unlock the test session. No keyboard assertions were skipped.");
+        CloseDesktop(desktop);
+        IntPtr handle = new WindowInteropHelper(app.Window).Handle;
+        Check(GetForegroundWindow() == handle || app.Window.Activate(),
+              "Could not activate the owned keyboard-test window; do not infer a menu failure. " + AppearanceFocusState(app));
+        Pump();
+        Check(GetForegroundWindow() == handle, "Keyboard fixture is not foreground. " + AppearanceFocusState(app));
+    }
+
     private static void TestAppearance(SessionWindow app, string preferences)
     {
         app.Apply(new Snapshot { rows = new SessionData[0], errors = new string[0] });
@@ -564,19 +608,62 @@ public static class GadgetUiTests
         var slider = (Slider)app.Window.FindName("AppearanceOpacity");
         Check(UIElementAutomationPeer.CreatePeerForElement(button).GetName() == "Appearance",
               "Appearance button has no discoverable automation name");
-        app.Grid.Focus();
-        IInputElement focus = Keyboard.FocusedElement;
-        Invoke(button);
-        Check(button.ContextMenu.IsOpen, "Appearance button did not open the menu");
-        Press(button.ContextMenu, Key.Tab);
-        Check(slider.IsKeyboardFocusWithin, "Tab does not reach the opacity slider");
-        Press(slider, Key.Left);
-        Check(app.OpacityPercent == 89, "Keyboard Left did not adjust opacity");
-        Press(slider, Key.Right);
-        Check(app.OpacityPercent == 90, "Keyboard Right did not restore opacity");
-        Press(button.ContextMenu, Key.Escape);
-        Check(!button.ContextMenu.IsOpen, "Escape did not close Appearance");
-        Check(Keyboard.FocusedElement == focus, "Appearance menu did not restore prior focus");
+        var focusTrace = new List<string>();
+        KeyboardFocusChangedEventHandler traceFocus = delegate(object sender, KeyboardFocusChangedEventArgs args)
+        {
+            var oldFocus = args.OldFocus as FrameworkElement;
+            var newFocus = args.NewFocus as FrameworkElement;
+            focusTrace.Add(String.Format("Focus {0}: {1}/{2} -> {3}/{4}: {5}", args.RoutedEvent.Name,
+                oldFocus == null ? "null" : oldFocus.GetType().Name, oldFocus == null ? "" : oldFocus.Name,
+                newFocus == null ? "null" : newFocus.GetType().Name, newFocus == null ? "" : newFocus.Name,
+                AppearanceFocusState(app)));
+        };
+        RoutedEventHandler traceOpened = delegate { focusTrace.Add("Opened: " + AppearanceFocusState(app)); };
+        RoutedEventHandler traceClosed = delegate { focusTrace.Add("Closed: " + AppearanceFocusState(app)); };
+        app.Window.AddHandler(Keyboard.GotKeyboardFocusEvent, traceFocus, true);
+        button.ContextMenu.AddHandler(Keyboard.GotKeyboardFocusEvent, traceFocus, true);
+        app.Window.AddHandler(Keyboard.LostKeyboardFocusEvent, traceFocus, true);
+        button.ContextMenu.AddHandler(Keyboard.LostKeyboardFocusEvent, traceFocus, true);
+        button.ContextMenu.Opened += traceOpened;
+        button.ContextMenu.Closed += traceClosed;
+        try
+        {
+            focusTrace.Add("Before grid focus: " + AppearanceFocusState(app));
+            RequireKeyboardFixture(app);
+            bool gridFocused = app.Grid.Focus();
+            IInputElement focus = Keyboard.FocusedElement;
+            focusTrace.Add("Grid.Focus=" + gridFocused + ": " + AppearanceFocusState(app));
+            Check(app.Grid.IsKeyboardFocusWithin && focus != null,
+                  "Keyboard fixture did not establish focus within the grid");
+            Invoke(button);
+            focusTrace.Add("After open/pump: " + AppearanceFocusState(app));
+            Check(button.ContextMenu.IsOpen, "Appearance button did not open the menu");
+            Press(button.ContextMenu, Key.Tab);
+            focusTrace.Add("After Tab/pump: " + AppearanceFocusState(app));
+            Check(slider.IsKeyboardFocusWithin, "Tab does not reach the opacity slider");
+            Press(slider, Key.Left);
+            Check(app.OpacityPercent == 89, "Keyboard Left did not adjust opacity");
+            Press(slider, Key.Right);
+            Check(app.OpacityPercent == 90, "Keyboard Right did not restore opacity");
+            Press(button.ContextMenu, Key.Escape);
+            Check(!button.ContextMenu.IsOpen, "Escape did not close Appearance");
+            Check(Keyboard.FocusedElement == focus, "Appearance menu did not restore prior focus");
+            Console.WriteLine("Keyboard fixture: interactive foreground verified; Open/Tab/arrows/Escape and focus restoration passed.");
+        }
+        catch
+        {
+            Console.Error.WriteLine(String.Join(Environment.NewLine, focusTrace));
+            throw;
+        }
+        finally
+        {
+            app.Window.RemoveHandler(Keyboard.GotKeyboardFocusEvent, traceFocus);
+            button.ContextMenu.RemoveHandler(Keyboard.GotKeyboardFocusEvent, traceFocus);
+            app.Window.RemoveHandler(Keyboard.LostKeyboardFocusEvent, traceFocus);
+            button.ContextMenu.RemoveHandler(Keyboard.LostKeyboardFocusEvent, traceFocus);
+            button.ContextMenu.Opened -= traceOpened;
+            button.ContextMenu.Closed -= traceClosed;
+        }
 
         bool effects = !SystemParameters.HighContrast && app.Backdrop.Mode != WindowAppearance.Opaque;
         Invoke(button);
