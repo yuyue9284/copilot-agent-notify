@@ -2,6 +2,46 @@
 
 set -u
 
+hook_alerts=${COPILOT_NOTIFY_HOOK_ALERTS:-}
+if [[ -z "$hook_alerts" ]]; then
+  config=${COPILOT_HOME:-"$HOME/.copilot"}/copilot-agent-notify.json
+  if [[ -f "$config" ]]; then
+    if ! command -v python3 >/dev/null 2>&1; then
+      printf 'copilot-notify: Python 3 is required to read %s.\n' "$config" >&2
+      exit 1
+    fi
+    if ! hook_alerts=$(python3 -c '
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as stream:
+        config = json.load(stream)
+    if not isinstance(config, dict):
+        raise ValueError("expected a JSON object")
+    value = config.get("hook_alerts", True)
+    if not isinstance(value, bool):
+        raise ValueError("hook_alerts must be true or false")
+    print("1" if value else "0")
+except (OSError, ValueError, TypeError) as error:
+    raise SystemExit("copilot-notify: invalid hook config: " + str(error))
+' "$config"); then
+      exit 1
+    fi
+  else
+    hook_alerts=1
+  fi
+fi
+
+case "$hook_alerts" in
+  0) exit 0 ;;
+  1) ;;
+  *)
+    printf 'copilot-notify: COPILOT_NOTIFY_HOOK_ALERTS must be 0 or 1.\n' >&2
+    exit 1
+    ;;
+esac
+
 payload=$(cat)
 
 hook_event=${1:-agentStop}

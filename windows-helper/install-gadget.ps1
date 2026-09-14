@@ -3,7 +3,8 @@ param([string]$Python)
 $ErrorActionPreference = "Stop"
 $source = Join-Path $PSScriptRoot "gadget\bin\Release"
 $files = @("CopilotSessions.exe", "CopilotSessions.exe.config",
-           "session_probe.py", "activity.py", "outer_progress.py")
+           "session_probe.py", "activity.py", "outer_progress.py",
+           "copilot-notify.exe")
 foreach ($name in $files) {
     if (-not (Test-Path -LiteralPath (Join-Path $source $name))) {
         throw "Missing prebuilt application file: $name. Run windows-helper\build-gadget.ps1 first."

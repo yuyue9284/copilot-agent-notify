@@ -18,6 +18,20 @@ using CopilotSessions;
 
 public static class GadgetUiTests
 {
+    private sealed class NotificationCapture : ISessionNotifier
+    {
+        internal readonly List<Tuple<string, SessionNotificationKind>> Items =
+            new List<Tuple<string, SessionNotificationKind>>();
+        public void Notify(SessionData session, SessionNotificationKind kind, Action<string> completed)
+        {
+            Items.Add(Tuple.Create(session.source + "/" + session.id, kind));
+            if (completed != null) completed(null);
+        }
+        internal void Clear() { Items.Clear(); }
+    }
+
+    private static readonly NotificationCapture Notifications = new NotificationCapture();
+
     private static void Check(bool condition, string message)
     {
         if (!condition) throw new InvalidOperationException(message);
@@ -540,7 +554,8 @@ public static class GadgetUiTests
         Invoke(choice);
         Pump();
         Check(choice.IsChecked, "Appearance choice was not checked: " + name);
-        Check(button.ContextMenu.Items.OfType<MenuItem>().Count(item => item.IsChecked) == 1,
+        Check(button.ContextMenu.Items.OfType<MenuItem>().Count(
+                  item => item.Tag != null && item.IsChecked) == 1,
               "Appearance choices must be mutually exclusive");
     }
 
@@ -690,15 +705,18 @@ public static class GadgetUiTests
             Check(button.ContextMenu.IsOpen, "Appearance button did not open the menu");
             Press(button.ContextMenu, Key.Tab);
             focusTrace.Add("After Tab/pump: " + AppearanceFocusState(app));
-            Check(slider.IsKeyboardFocusWithin, "Tab does not reach the opacity slider");
+            Check(((MenuItem)app.Window.FindName("DesktopNotifications")).IsKeyboardFocusWithin,
+                  "Tab does not reach the desktop-notification toggle");
+            Press(button.ContextMenu, Key.Tab);
+            Check(slider.IsKeyboardFocusWithin, "Second Tab does not reach the opacity slider");
             Press(slider, Key.Left);
             Check(app.OpacityPercent == 89, "Keyboard Left did not adjust opacity");
             Press(slider, Key.Right);
             Check(app.OpacityPercent == 90, "Keyboard Right did not restore opacity");
             Press(button.ContextMenu, Key.Tab);
-            Check(fontFamily.IsKeyboardFocusWithin, "Second Tab does not reach the font-family dropdown");
+            Check(fontFamily.IsKeyboardFocusWithin, "Third Tab does not reach the font-family dropdown");
             Press(button.ContextMenu, Key.Tab);
-            Check(fontSize.IsKeyboardFocusWithin, "Third Tab does not reach the font-size slider");
+            Check(fontSize.IsKeyboardFocusWithin, "Fourth Tab does not reach the font-size slider");
             Press(fontSize, Key.Left);
             Check(app.InterfaceFontSize == 12, "Keyboard Left did not adjust font size");
             Press(fontSize, Key.Right);
@@ -773,7 +791,7 @@ public static class GadgetUiTests
         Press(button.ContextMenu, Key.Escape);
         ((ToggleButton)app.Window.FindName("Compact")).IsChecked = true;
         Pump();
-        var restored = new SessionWindow(preferences);
+        var restored = new SessionWindow(preferences, Notifications);
         try
         {
             Check(restored.IsCompact && restored.Appearance == AppearancePreference.Translucent &&
@@ -840,12 +858,13 @@ public static class GadgetUiTests
         try
         {
             File.WriteAllText(path, "{\"compact\":true}");
-            var legacy = new SessionWindow(path);
+            var legacy = new SessionWindow(path, Notifications);
             try
             {
                 Check(legacy.IsCompact && legacy.Appearance == AppearancePreference.Auto && legacy.OpacityPercent == 90 &&
                       legacy.InterfaceFontFamily == SessionWindow.DefaultInterfaceFontFamily &&
-                      legacy.InterfaceFontSize == SessionWindow.DefaultInterfaceFontSize,
+                      legacy.InterfaceFontSize == SessionWindow.DefaultInterfaceFontSize &&
+                      legacy.NotificationsEnabled,
                       "Legacy compact-only preference did not default to Auto/90 and the standard font");
             }
             finally { legacy.Window.Close(); }
@@ -862,18 +881,21 @@ public static class GadgetUiTests
                 "{\"compact\":true,\"font_family\":\"Definitely Missing Font 9284\"}",
                 "{\"compact\":true,\"font_size\":9}", "{\"compact\":true,\"font_size\":19}",
                 "{\"compact\":true,\"font_size\":13.5}", "{\"compact\":true,\"font_size\":\"13\"}",
-                "{\"compact\":true,\"font_size\":null}", "{\"compact\":true,\"font_size\":true}"
+                "{\"compact\":true,\"font_size\":null}", "{\"compact\":true,\"font_size\":true}",
+                "{\"compact\":true,\"notifications\":null}", "{\"compact\":true,\"notifications\":1}",
+                "{\"compact\":true,\"notifications\":\"true\"}"
             };
             foreach (string json in invalid)
             {
                 File.WriteAllText(path, json);
-                var bad = new SessionWindow(path);
+                var bad = new SessionWindow(path, Notifications);
                 try
                 {
                     bad.Apply(Sample());
                     Check(!bad.IsCompact && bad.Appearance == AppearancePreference.Auto && bad.OpacityPercent == 90 &&
                           bad.InterfaceFontFamily == SessionWindow.DefaultInterfaceFontFamily &&
-                          bad.InterfaceFontSize == SessionWindow.DefaultInterfaceFontSize,
+                          bad.InterfaceFontSize == SessionWindow.DefaultInterfaceFontSize &&
+                          bad.NotificationsEnabled,
                           "Invalid preference was partially accepted: " + json);
                     Check(((FrameworkElement)bad.Window.FindName("ErrorPanel")).Visibility == Visibility.Visible,
                           "Invalid preference was not surfaced: " + json);
@@ -882,7 +904,7 @@ public static class GadgetUiTests
             }
             File.Delete(path);
             Directory.CreateDirectory(path);
-            var failure = new SessionWindow(path);
+            var failure = new SessionWindow(path, Notifications);
             try
             {
                 failure.Apply(Sample());
@@ -1221,6 +1243,67 @@ public static class GadgetUiTests
         Check(SessionWindow.CreateBadge(100) != null, "99+ badge failed");
     }
 
+    private static void TestNotifications(SessionWindow app, string preferences)
+    {
+        Notifications.Clear();
+        app.Apply(new Snapshot { rows = new SessionData[0], errors = new string[0] });
+        var loading = Sample();
+        loading.rows[0].status = "Loading";
+        loading.rows[0].activity_revision = null;
+        app.Apply(loading);
+        var initialWaiting = Sample();
+        initialWaiting.rows[0].status = "Needs input";
+        initialWaiting.rows[0].activity_revision = "00000000000000000099/old-input";
+        app.Apply(initialWaiting);
+        Check(Notifications.Items.Count == 0,
+              "Initial transcript replay produced a retroactive needs-input notification");
+        app.Apply(new Snapshot { rows = new SessionData[0], errors = new string[0] });
+        var working = Sample();
+        working.rows[0].activity_revision = "00000000000000000100/work";
+        app.Apply(working);
+        Check(Notifications.Items.Count == 0, "Initial session snapshot produced a notification");
+
+        var waiting = Sample();
+        waiting.rows[0].status = "Needs input";
+        waiting.rows[0].activity_revision = "00000000000000000101/input";
+        app.Apply(waiting);
+        Check(Notifications.Items.Count == 1 &&
+              Notifications.Items[0].Item2 == SessionNotificationKind.NeedsInput,
+              "Needs-input transition did not produce exactly one notification");
+        app.Apply(waiting);
+        Check(Notifications.Items.Count == 1, "Repeated needs-input snapshot duplicated a notification");
+
+        var done = Sample();
+        done.rows[0].status = "Done";
+        done.rows[0].activity_revision = waiting.rows[0].activity_revision;
+        app.Apply(done);
+        Check(Notifications.Items.Count == 2 &&
+              Notifications.Items[1].Item2 == SessionNotificationKind.Completed,
+              "Observed completion did not produce exactly one notification");
+        app.Apply(done);
+        Check(Notifications.Items.Count == 2, "Repeated completion snapshot duplicated a notification");
+
+        var toggle = (MenuItem)app.Window.FindName("DesktopNotifications");
+        Invoke(((Button)app.Window.FindName("AppearanceButton")));
+        Invoke(toggle);
+        Check(!app.NotificationsEnabled && !toggle.IsChecked,
+              "Desktop notification preference did not turn off");
+        working.rows[0].activity_revision = "00000000000000000102/work";
+        done.rows[0].activity_revision = working.rows[0].activity_revision;
+        app.Apply(working);
+        app.Apply(done);
+        Check(Notifications.Items.Count == 2, "Disabled gadget notifications still produced an alert");
+
+        var restored = new SessionWindow(preferences, Notifications);
+        try { Check(!restored.NotificationsEnabled, "Notification preference did not survive restart"); }
+        finally { restored.Window.Close(); }
+        Invoke(((Button)app.Window.FindName("AppearanceButton")));
+        Invoke(toggle);
+        Check(app.NotificationsEnabled && toggle.IsChecked,
+              "Desktop notification preference did not turn back on");
+        app.Apply(new Snapshot { rows = new SessionData[0], errors = new string[0] });
+    }
+
     private static void TestSharedProcess(SessionWindow app)
     {
         app.Apply(new Snapshot { rows = new SessionData[0], errors = new string[0] });
@@ -1285,7 +1368,7 @@ public static class GadgetUiTests
         app.Apply(new Snapshot { rows = new SessionData[0], errors = new string[0] });
         app.Apply(ForgetSample(first));
         Check(app.Rows.Count == 2, "Reconnecting alone resurfaced forgotten session");
-        var restored = new SessionWindow(preferences);
+        var restored = new SessionWindow(preferences, Notifications);
         try
         {
             restored.Apply(ForgetSample(first));
@@ -1317,7 +1400,7 @@ public static class GadgetUiTests
         Directory.CreateDirectory(directory);
         string blocked = Path.Combine(directory, "gadget-forgotten.json");
         Directory.CreateDirectory(blocked);
-        var failure = new SessionWindow(Path.Combine(directory, "gadget-ui.json"));
+        var failure = new SessionWindow(Path.Combine(directory, "gadget-ui.json"), Notifications);
         try
         {
             failure.Apply(ForgetSample(first));
@@ -1442,7 +1525,7 @@ public static class GadgetUiTests
         string directory = Path.Combine(Path.GetTempPath(), "GadgetUiTests-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(directory);
         string preferences = Path.Combine(directory, "gadget-ui.json");
-        var app = new SessionWindow(preferences);
+        var app = new SessionWindow(preferences, Notifications);
         try
         {
             app.Apply(Sample());
@@ -1497,6 +1580,7 @@ public static class GadgetUiTests
             app.Sort(app.Grid.Columns[2], ListSortDirection.Ascending);
             Pump();
             TestUnread(app);
+            TestNotifications(app, preferences);
             TestSharedProcess(app);
             TestForget(app, preferences);
             TestScrollbars(app);
@@ -1526,7 +1610,7 @@ public static class GadgetUiTests
             app.Window.Height = app.Window.MinHeight;
             Pump();
             Check(app.Grid.ActualHeight >= 80, "Compact layout unusable at minimum size");
-            var restored = new SessionWindow(preferences);
+            var restored = new SessionWindow(preferences, Notifications);
             Check(restored.IsCompact, "Compact preference did not survive restart");
             restored.Window.Close();
             compact.IsChecked = false;

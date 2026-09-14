@@ -24,6 +24,7 @@ class NotificationTests(unittest.TestCase):
         }) + "\n")
         self.env = dict(os.environ, COPILOT_HOME=str(self.directory / "home"),
                         CAPTURE_FILE=str(self.capture), COPILOT_NOTIFY_ICONS="0")
+        self.env.pop("COPILOT_NOTIFY_HOOK_ALERTS", None)
         self.runners = {}
         bash = shutil.which("bash")
         if bash and os.name != "nt":
@@ -55,14 +56,58 @@ class NotificationTests(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.directory)
 
-    def run_hook(self, runner, hook, payload, opt_in="0"):
+    def run_hook(self, runner, hook, payload, opt_in="0", hook_alerts=None):
         self.capture.unlink(missing_ok=True)
+        environment = dict(self.env, COPILOT_NOTIFY_SUBAGENTS=opt_in)
+        if hook_alerts is not None:
+            environment["COPILOT_NOTIFY_HOOK_ALERTS"] = hook_alerts
         result = subprocess.run(self.runners[runner] + [hook], input=json.dumps(payload),
                                 text=True, capture_output=True, timeout=15,
-                                env=dict(self.env, COPILOT_NOTIFY_SUBAGENTS=opt_in))
+                                env=environment)
         if os.name == "nt" and "AuthorizationManager check failed" in result.stderr:
             self.skipTest("Native PowerShell refuses scripts on this filesystem; no policy changed")
         return result, self.capture.read_text() if self.capture.exists() else ""
+
+    def test_hook_alerts_can_be_disabled_independently(self):
+        payloads = {
+            "agentStop": {"sessionId": "root-session", "transcriptPath": str(self.transcript)},
+            "subagentStop": {"sessionId": "root-session", "agentId": "child-session"},
+            "notification": {"sessionId": "root-session", "notification_type": "permission_prompt"},
+        }
+        for runner in self.runners:
+            for hook, payload in payloads.items():
+                with self.subTest(runner=runner, hook=hook):
+                    result, captured = self.run_hook(runner, hook, payload, opt_in="1", hook_alerts="0")
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout, "")
+                    self.assertEqual(captured, "")
+            result, captured = self.run_hook(
+                runner, "agentStop", payloads["agentStop"], hook_alerts="invalid")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("COPILOT_NOTIFY_HOOK_ALERTS must be 0 or 1", result.stderr)
+            self.assertEqual(captured, "")
+
+    def test_hook_alerts_can_be_disabled_by_user_config(self):
+        config = Path(self.env["COPILOT_HOME"]) / "copilot-agent-notify.json"
+        config.parent.mkdir(parents=True)
+        payload = {"sessionId": "root-session", "transcriptPath": str(self.transcript)}
+        for runner in self.runners:
+            with self.subTest(runner=runner, setting=False):
+                config.write_text('{"hook_alerts":false}', encoding="utf-8")
+                result, captured = self.run_hook(runner, "agentStop", payload)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(captured, "")
+            with self.subTest(runner=runner, override=True):
+                result, captured = self.run_hook(runner, "agentStop", payload, hook_alerts="1")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("Agent finished responding", captured)
+            with self.subTest(runner=runner, invalid=True):
+                config.write_text('{"hook_alerts":"no"}', encoding="utf-8")
+                result, captured = self.run_hook(runner, "agentStop", payload)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("invalid hook config", result.stderr)
+                self.assertEqual(captured, "")
+        config.unlink()
 
     def test_root_completion_and_child_stop_suppression(self):
         for runner in self.runners:

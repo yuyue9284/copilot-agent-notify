@@ -26,12 +26,15 @@ namespace CopilotSessions
         private SessionData data;
         private bool working;
         public bool Unread { get; private set; }
+        public bool HasReliableState { get; private set; }
         public SessionRow(SessionData value, bool resurfaced = false)
         {
             data = value.Clone();
             working = value.status == "In progress" || value.status == "Needs input";
             Unread = resurfaced && value.status == "Done";
+            HasReliableState = value.status != "Loading" && value.status != "Unknown";
         }
+
         public string Key { get { return Source + "/" + Id; } }
         public string Id { get { return data.id; } }
         public string ShortId { get { return Id.Substring(0, Math.Min(8, Id.Length)); } }
@@ -72,6 +75,7 @@ namespace CopilotSessions
             {
                 working = false;
                 Unread = false;
+                HasReliableState = false;
             }
             if (value.status == "In progress" || value.status == "Needs input")
             {
@@ -83,6 +87,8 @@ namespace CopilotSessions
                 Unread = true;
                 working = false;
             }
+            if (value.status != "Loading" && value.status != "Unknown")
+                HasReliableState = true;
             data = value.Clone();
             Notify();
         }
@@ -116,9 +122,12 @@ namespace CopilotSessions
         private bool applying;
         private readonly string preferencesPath;
         private readonly string forgottenPath;
+        private readonly ISessionNotifier notifier;
+        private readonly HashSet<string> sentNotifications = new HashSet<string>(StringComparer.Ordinal);
         private Dictionary<string, string> forgotten = new Dictionary<string, string>();
         private Snapshot latestSnapshot;
         private string forgottenError;
+        private string notificationError;
         private double comfortableWidth = 900, comfortableHeight = 530;
         private string settingsError;
         private bool updatingPreferences;
@@ -128,16 +137,18 @@ namespace CopilotSessions
         internal int OpacityPercent { get; private set; }
         internal string InterfaceFontFamily { get; private set; }
         internal int InterfaceFontSize { get; private set; }
+        internal bool NotificationsEnabled { get; private set; }
         public int UnreadCount { get { return Rows.Count(row => row.Unread); } }
 
         internal readonly WindowBackdrop Backdrop;
 
-        public SessionWindow(string settingsPath = null)
+        public SessionWindow(string settingsPath = null, ISessionNotifier sessionNotifier = null)
         {
             preferencesPath = settingsPath ?? Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                 "CopilotAgentNotify", "gadget-ui.json");
             forgottenPath = Path.Combine(Path.GetDirectoryName(preferencesPath), "gadget-forgotten.json");
+            notifier = sessionNotifier ?? new NativeSessionNotifier(AppDomain.CurrentDomain.BaseDirectory);
             LoadForgotten();
             using (Stream stream = Assembly.GetExecutingAssembly().GetManifestResourceStream("SessionWindow.xaml"))
                 Window = (Window)XamlReader.Load(stream);
@@ -188,6 +199,7 @@ namespace CopilotSessions
             OpacityPercent = 90;
             InterfaceFontFamily = DefaultInterfaceFontFamily;
             InterfaceFontSize = DefaultInterfaceFontSize;
+            NotificationsEnabled = true;
             bool initialCompact = LoadPreferences();
             Backdrop = new WindowBackdrop(Window);
             Backdrop.Changed += delegate { UpdatePopupAppearance(); };
@@ -213,6 +225,7 @@ namespace CopilotSessions
                 int opacity = 90;
                 string fontFamily = DefaultInterfaceFontFamily;
                 int fontSize = DefaultInterfaceFontSize;
+                bool notifications = true;
                 if (values.ContainsKey("appearance"))
                 {
                     string mode = values["appearance"] as string;
@@ -240,10 +253,17 @@ namespace CopilotSessions
                         throw new ArgumentException("Expected an integer font_size from 10 to 18.");
                     fontSize = (int)values["font_size"];
                 }
+                if (values.ContainsKey("notifications"))
+                {
+                    if (!(values["notifications"] is bool))
+                        throw new ArgumentException("Expected a boolean notifications preference.");
+                    notifications = (bool)values["notifications"];
+                }
                 Appearance = appearance;
                 OpacityPercent = opacity;
                 InterfaceFontFamily = fontFamily;
                 InterfaceFontSize = fontSize;
+                NotificationsEnabled = notifications;
                 return (bool)values["compact"];
             }
             catch (IOException error) { settingsError = "Cannot load preferences: " + error.Message; }
@@ -290,6 +310,7 @@ namespace CopilotSessions
                     var controls = new List<Control> {
                         menu.Items.OfType<MenuItem>().First(item => item.IsChecked)
                     };
+                    controls.Add((MenuItem)Window.FindName("DesktopNotifications"));
                     if (slider.IsEnabled) controls.Add(slider);
                     controls.Add(fontFamily);
                     controls.Add(fontSize);
@@ -309,6 +330,10 @@ namespace CopilotSessions
                                      OpacityPercent);
                     args.Handled = true;
                 };
+            ((MenuItem)Window.FindName("DesktopNotifications")).Click += delegate
+            {
+                ChangeNotifications(!NotificationsEnabled);
+            };
             slider.ValueChanged += delegate
             {
                 if (updatingPreferences) return;
@@ -337,7 +362,8 @@ namespace CopilotSessions
         private void ChangeAppearance(AppearancePreference appearance, int opacity)
         {
             if (updatingPreferences) return;
-            if (SavePreferences(IsCompact, appearance, opacity, InterfaceFontFamily, InterfaceFontSize))
+            if (SavePreferences(IsCompact, appearance, opacity, InterfaceFontFamily, InterfaceFontSize,
+                                NotificationsEnabled))
             {
                 Appearance = appearance;
                 OpacityPercent = opacity;
@@ -347,10 +373,19 @@ namespace CopilotSessions
             SynchronizePreferenceControls();
         }
 
+        private void ChangeNotifications(bool enabled)
+        {
+            if (updatingPreferences) return;
+            if (SavePreferences(IsCompact, Appearance, OpacityPercent, InterfaceFontFamily,
+                                InterfaceFontSize, enabled))
+                NotificationsEnabled = enabled;
+            SynchronizePreferenceControls();
+        }
+
         private void ChangeInterfaceFont(string family, int size)
         {
             if (updatingPreferences) return;
-            if (SavePreferences(IsCompact, Appearance, OpacityPercent, family, size))
+            if (SavePreferences(IsCompact, Appearance, OpacityPercent, family, size, NotificationsEnabled))
             {
                 InterfaceFontFamily = family;
                 InterfaceFontSize = size;
@@ -418,6 +453,7 @@ namespace CopilotSessions
                 var fontSize = (Slider)Window.FindName("InterfaceFontSize");
                 fontSize.Value = InterfaceFontSize;
                 ((TextBlock)Window.FindName("FontSizeLabel")).Text = "Font size: " + InterfaceFontSize;
+                ((MenuItem)Window.FindName("DesktopNotifications")).IsChecked = NotificationsEnabled;
             }
             finally { updatingPreferences = false; }
         }
@@ -489,7 +525,7 @@ namespace CopilotSessions
         {
             if (updatingPreferences) return;
             if (save && !SavePreferences(compact, Appearance, OpacityPercent,
-                                         InterfaceFontFamily, InterfaceFontSize))
+                                         InterfaceFontFamily, InterfaceFontSize, NotificationsEnabled))
             {
                 SynchronizePreferenceControls();
                 return;
@@ -523,7 +559,7 @@ namespace CopilotSessions
         }
 
         private bool SavePreferences(bool compact, AppearancePreference appearance, int opacity,
-                                     string fontFamily, int fontSize)
+                                     string fontFamily, int fontSize, bool notifications)
         {
             try
             {
@@ -533,7 +569,8 @@ namespace CopilotSessions
                 {
                     File.WriteAllText(scratch, new JavaScriptSerializer().Serialize(
                         new { compact = compact, appearance = appearance.ToString().ToLowerInvariant(),
-                              opacity = opacity, font_family = fontFamily, font_size = fontSize }));
+                              opacity = opacity, font_family = fontFamily, font_size = fontSize,
+                              notifications = notifications }));
                     if (File.Exists(preferencesPath)) File.Replace(scratch, preferencesPath, null);
                     else File.Move(scratch, preferencesPath);
                 }
@@ -648,8 +685,27 @@ namespace CopilotSessions
             foreach (var item in incoming)
             {
                 SessionRow row;
-                if (existing.TryGetValue(item.Key, out row)) row.Update(item.Value);
-                else Rows.Add(new SessionRow(item.Value, resurfaced.Contains(item.Key)));
+                if (existing.TryGetValue(item.Key, out row))
+                {
+                    bool unread = row.Unread;
+                    bool reliable = row.HasReliableState;
+                    bool sameProcess = row.Pid == item.Value.pid;
+                    string previousStatus = row.Status;
+                    row.Update(item.Value);
+                    if (!unread && row.Unread) Notify(item.Value, SessionNotificationKind.Completed);
+                    if (sameProcess && reliable && item.Value.status == "Needs input"
+                        && previousStatus != "Needs input")
+                        Notify(item.Value, SessionNotificationKind.NeedsInput);
+                }
+                else
+                {
+                    bool wasResurfaced = resurfaced.Contains(item.Key);
+                    Rows.Add(new SessionRow(item.Value, wasResurfaced));
+                    if (wasResurfaced && item.Value.status == "Done")
+                        Notify(item.Value, SessionNotificationKind.Completed);
+                    else if (wasResurfaced && item.Value.status == "Needs input")
+                        Notify(item.Value, SessionNotificationKind.NeedsInput);
+                }
             }
             // Property updates can change a sort key without changing collection membership.
             view.Refresh();
@@ -688,11 +744,36 @@ namespace CopilotSessions
         {
             if (settingsError != null) errors = errors.Concat(new[] { settingsError }).ToArray();
             if (forgottenError != null) errors = errors.Concat(new[] { forgottenError }).ToArray();
+            if (notificationError != null) errors = errors.Concat(new[] { notificationError }).ToArray();
             Text("ErrorText", String.Join("\n", errors.Take(3)));
             Element("ErrorText").ToolTip = String.Join("\n", errors);
             Element("ErrorPanel").Visibility = errors.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
             ((System.Windows.Shapes.Ellipse)Window.FindName("LiveDot")).Fill =
                 new SolidColorBrush((Color)ColorConverter.ConvertFromString(errors.Length == 0 ? "#72C9AF" : "#F3CF87"));
+        }
+        private void Notify(SessionData session, SessionNotificationKind kind)
+        {
+            if (!NotificationsEnabled || String.IsNullOrEmpty(session.activity_revision)) return;
+            string identity = session.source + "/" + session.id + "/" + session.pid + "/" +
+                kind + "/" + session.activity_revision;
+            if (!sentNotifications.Add(identity)) return;
+            notifier.Notify(session, kind, delegate(string error)
+            {
+                if (closed || Window.Dispatcher.HasShutdownStarted) return;
+                try
+                {
+                    Window.Dispatcher.BeginInvoke(new Action(delegate
+                    {
+                        if (closed) return;
+                        notificationError = error;
+                        SetErrors(latestSnapshot == null ? new string[0] : latestSnapshot.errors);
+                    }));
+                }
+                catch (InvalidOperationException)
+                {
+                    if (!closed && !Window.Dispatcher.HasShutdownStarted) throw;
+                }
+            });
         }
         private void Disconnected(string error)
         {

@@ -480,6 +480,12 @@
                       Style="{StaticResource AppearanceItemStyle}" AutomationProperties.AutomationId="AppearanceSolid" AutomationProperties.Name="Solid"
                       ToolTip="Fully opaque dark appearance"/>
             <Separator Background="#334156" Margin="8,4"/>
+            <MenuItem x:Name="DesktopNotifications" Header="_Desktop notifications" IsCheckable="True"
+                      StaysOpenOnClick="True" Style="{StaticResource AppearanceItemStyle}"
+                      AutomationProperties.AutomationId="DesktopNotifications"
+                      AutomationProperties.Name="Desktop notifications"
+                      ToolTip="Notify when an observed session needs input or finishes"/>
+            <Separator Background="#334156" Margin="8,4"/>
             <MenuItem Style="{StaticResource AppearanceItemStyle}" StaysOpenOnClick="True" Focusable="False">
               <MenuItem.Header>
                 <StackPanel Width="210">

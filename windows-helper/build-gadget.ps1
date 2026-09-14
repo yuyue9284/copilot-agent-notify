@@ -20,7 +20,8 @@ if ($LASTEXITCODE -ne 0) {
 }
 $output = Join-Path $PSScriptRoot "gadget\bin\$Configuration"
 foreach ($name in @("CopilotSessions.exe", "CopilotSessions.exe.config",
-                    "session_probe.py", "activity.py", "outer_progress.py")) {
+                    "session_probe.py", "activity.py", "outer_progress.py",
+                    "copilot-notify.exe")) {
     if (-not (Test-Path -LiteralPath (Join-Path $output $name))) {
         throw "Build output is incomplete: $name is missing from $output."
     }

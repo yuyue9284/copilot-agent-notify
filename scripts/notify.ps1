@@ -4,6 +4,41 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$hookAlerts = $env:COPILOT_NOTIFY_HOOK_ALERTS
+if (-not $hookAlerts) {
+    $copilotHome = if ($env:COPILOT_HOME) {
+        $env:COPILOT_HOME
+    } else {
+        Join-Path $HOME ".copilot"
+    }
+    $configPath = Join-Path $copilotHome "copilot-agent-notify.json"
+    if (Test-Path -LiteralPath $configPath) {
+        try {
+            $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
+            if ($null -eq $config -or -not ($config -is [PSCustomObject])) {
+                throw "expected a JSON object"
+            }
+            if ($config.PSObject.Properties.Name -contains "hook_alerts") {
+                if ($config.hook_alerts -isnot [bool]) {
+                    throw "hook_alerts must be true or false"
+                }
+                $hookAlerts = if ($config.hook_alerts) { "1" } else { "0" }
+            } else {
+                $hookAlerts = "1"
+            }
+        } catch {
+            throw "copilot-notify: invalid hook config: $($_.Exception.Message)"
+        }
+    } else {
+        $hookAlerts = "1"
+    }
+}
+if ($hookAlerts -eq "0") {
+    exit 0
+}
+if ($hookAlerts -ne "1") {
+    throw "copilot-notify: COPILOT_NOTIFY_HOOK_ALERTS must be 0 or 1."
+}
 $payload = [Console]::In.ReadToEnd() | ConvertFrom-Json
 if ($HookEvent -eq "subagentStop") {
     if (-not $env:COPILOT_NOTIFY_SUBAGENTS -or $env:COPILOT_NOTIFY_SUBAGENTS -eq "0") {
