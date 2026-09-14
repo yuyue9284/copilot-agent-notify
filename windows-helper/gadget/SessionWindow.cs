@@ -100,6 +100,13 @@ namespace CopilotSessions
 
     public sealed class SessionWindow
     {
+        internal const string DefaultInterfaceFontFamily = "Segoe UI";
+        internal const int DefaultInterfaceFontSize = 13;
+        private static readonly string[] InstalledInterfaceFonts = Fonts.SystemFontFamilies
+            .Select(family => family.Source).Concat(new[] { DefaultInterfaceFontFamily })
+            .Where(name => !String.IsNullOrWhiteSpace(name))
+            .Distinct(StringComparer.CurrentCultureIgnoreCase)
+            .OrderBy(name => name, StringComparer.CurrentCultureIgnoreCase).ToArray();
         public readonly Window Window;
         public readonly DataGrid Grid;
         public readonly ObservableCollection<SessionRow> Rows = new ObservableCollection<SessionRow>();
@@ -119,6 +126,8 @@ namespace CopilotSessions
         public bool IsCompact { get; private set; }
         internal AppearancePreference Appearance { get; private set; }
         internal int OpacityPercent { get; private set; }
+        internal string InterfaceFontFamily { get; private set; }
+        internal int InterfaceFontSize { get; private set; }
         public int UnreadCount { get { return Rows.Count(row => row.Unread); } }
 
         internal readonly WindowBackdrop Backdrop;
@@ -175,11 +184,15 @@ namespace CopilotSessions
             pin.Checked += delegate { Window.Topmost = true; };
             pin.Unchecked += delegate { Window.Topmost = false; };
             ToggleButton compact = (ToggleButton)Window.FindName("Compact");
+            Appearance = AppearancePreference.Auto;
             OpacityPercent = 90;
+            InterfaceFontFamily = DefaultInterfaceFontFamily;
+            InterfaceFontSize = DefaultInterfaceFontSize;
             bool initialCompact = LoadPreferences();
             Backdrop = new WindowBackdrop(Window);
             Backdrop.Configure(Appearance, OpacityPercent);
             InitializeAppearance();
+            ApplyInterfaceFont();
             SetCompact(initialCompact, false);
             compact.Checked += delegate { SetCompact(true); };
             compact.Unchecked += delegate { SetCompact(false); };
@@ -196,6 +209,8 @@ namespace CopilotSessions
                     throw new ArgumentException("Expected a boolean compact preference.");
                 AppearancePreference appearance = AppearancePreference.Auto;
                 int opacity = 90;
+                string fontFamily = DefaultInterfaceFontFamily;
+                int fontSize = DefaultInterfaceFontSize;
                 if (values.ContainsKey("appearance"))
                 {
                     string mode = values["appearance"] as string;
@@ -209,8 +224,24 @@ namespace CopilotSessions
                         throw new ArgumentException("Expected an integer opacity percentage from 50 to 100.");
                     opacity = (int)values["opacity"];
                 }
+                if (values.ContainsKey("font_family"))
+                {
+                    string requested = values["font_family"] as string;
+                    fontFamily = InstalledInterfaceFonts.FirstOrDefault(
+                        name => String.Equals(name, requested, StringComparison.CurrentCultureIgnoreCase));
+                    if (fontFamily == null)
+                        throw new ArgumentException("Expected font_family to name an installed font.");
+                }
+                if (values.ContainsKey("font_size"))
+                {
+                    if (!(values["font_size"] is int) || (int)values["font_size"] < 10 || (int)values["font_size"] > 18)
+                        throw new ArgumentException("Expected an integer font_size from 10 to 18.");
+                    fontSize = (int)values["font_size"];
+                }
                 Appearance = appearance;
                 OpacityPercent = opacity;
+                InterfaceFontFamily = fontFamily;
+                InterfaceFontSize = fontSize;
                 return (bool)values["compact"];
             }
             catch (IOException error) { settingsError = "Cannot load preferences: " + error.Message; }
@@ -225,6 +256,9 @@ namespace CopilotSessions
             var button = (Button)Window.FindName("AppearanceButton");
             var menu = button.ContextMenu;
             var slider = (Slider)Window.FindName("AppearanceOpacity");
+            var fontFamily = (ComboBox)Window.FindName("InterfaceFontFamily");
+            var fontSize = (Slider)Window.FindName("InterfaceFontSize");
+            fontFamily.ItemsSource = InstalledInterfaceFonts;
             button.PreviewMouseDown += delegate { appearanceReturnFocus = Keyboard.FocusedElement; };
             button.Click += delegate
             {
@@ -248,11 +282,18 @@ namespace CopilotSessions
             };
             menu.PreviewKeyDown += delegate(object sender, KeyEventArgs args)
             {
-                if (args.Key == Key.Tab && slider.IsEnabled)
+                if (args.Key == Key.Tab)
                 {
-                    if (slider.IsKeyboardFocusWithin)
-                        menu.Items.OfType<MenuItem>().First(item => item.IsChecked).Focus();
-                    else slider.Focus();
+                    var controls = new List<Control> {
+                        menu.Items.OfType<MenuItem>().First(item => item.IsChecked)
+                    };
+                    if (slider.IsEnabled) controls.Add(slider);
+                    controls.Add(fontFamily);
+                    controls.Add(fontSize);
+                    int current = controls.FindIndex(control => control.IsKeyboardFocusWithin);
+                    int direction = (Keyboard.Modifiers & ModifierKeys.Shift) != 0 ? -1 : 1;
+                    int next = current < 0 ? 0 : (current + direction + controls.Count) % controls.Count;
+                    controls[next].Focus();
                     args.Handled = true;
                 }
                 else if (args.Key == Key.Escape) { menu.IsOpen = false; args.Handled = true; }
@@ -272,18 +313,68 @@ namespace CopilotSessions
                 if (percent != OpacityPercent) ChangeAppearance(Appearance, percent);
                 else SynchronizePreferenceControls();
             };
+            fontFamily.SelectionChanged += delegate
+            {
+                if (updatingPreferences) return;
+                string selected = fontFamily.SelectedItem as string;
+                if (selected != null && !String.Equals(selected, InterfaceFontFamily, StringComparison.Ordinal))
+                    ChangeInterfaceFont(selected, InterfaceFontSize);
+                else SynchronizePreferenceControls();
+            };
+            fontSize.ValueChanged += delegate
+            {
+                if (updatingPreferences) return;
+                int size = (int)Math.Round(fontSize.Value, MidpointRounding.AwayFromZero);
+                if (size != InterfaceFontSize) ChangeInterfaceFont(InterfaceFontFamily, size);
+                else SynchronizePreferenceControls();
+            };
         }
 
         private void ChangeAppearance(AppearancePreference appearance, int opacity)
         {
             if (updatingPreferences) return;
-            if (SavePreferences(IsCompact, appearance, opacity))
+            if (SavePreferences(IsCompact, appearance, opacity, InterfaceFontFamily, InterfaceFontSize))
             {
                 Appearance = appearance;
                 OpacityPercent = opacity;
                 Backdrop.Configure(appearance, opacity);
             }
             SynchronizePreferenceControls();
+        }
+
+        private void ChangeInterfaceFont(string family, int size)
+        {
+            if (updatingPreferences) return;
+            if (SavePreferences(IsCompact, Appearance, OpacityPercent, family, size))
+            {
+                InterfaceFontFamily = family;
+                InterfaceFontSize = size;
+                ApplyInterfaceFont();
+            }
+            SynchronizePreferenceControls();
+        }
+
+        private void ApplyInterfaceFont()
+        {
+            var family = new FontFamily(InterfaceFontFamily);
+            Window.FontFamily = family;
+            Window.FontSize = InterfaceFontSize;
+            var menu = ((Button)Window.FindName("AppearanceButton")).ContextMenu;
+            menu.FontFamily = family;
+            menu.FontSize = InterfaceFontSize;
+            Window.Resources["SmallFontSize"] = (double)Math.Max(9, InterfaceFontSize - 2);
+            Window.Resources["SummaryFontSize"] = (double)(InterfaceFontSize + 11);
+            Window.Resources["EmptyTitleFontSize"] = (double)(InterfaceFontSize + 2);
+            Window.Resources["EmptyIconFontSize"] = (double)(InterfaceFontSize + 17);
+            Window.Resources["HeadingFontSize"] = (double)(InterfaceFontSize + (IsCompact ? 5 : 12));
+            UpdateMinimumSize();
+        }
+
+        private void UpdateMinimumSize()
+        {
+            int growth = Math.Max(0, InterfaceFontSize - DefaultInterfaceFontSize);
+            Window.MinWidth = (IsCompact ? 420 : 640) + growth * (IsCompact ? 18 : 24);
+            Window.MinHeight = (IsCompact ? 230 : 380) + growth * 8;
         }
 
         private void SynchronizePreferenceControls()
@@ -299,6 +390,10 @@ namespace CopilotSessions
                 slider.Value = OpacityPercent;
                 slider.IsEnabled = Appearance == AppearancePreference.Auto || Appearance == AppearancePreference.Translucent;
                 ((TextBlock)Window.FindName("OpacityLabel")).Text = "Translucent opacity: " + OpacityPercent + "%";
+                ((ComboBox)Window.FindName("InterfaceFontFamily")).SelectedItem = InterfaceFontFamily;
+                var fontSize = (Slider)Window.FindName("InterfaceFontSize");
+                fontSize.Value = InterfaceFontSize;
+                ((TextBlock)Window.FindName("FontSizeLabel")).Text = "Font size: " + InterfaceFontSize;
             }
             finally { updatingPreferences = false; }
         }
@@ -369,7 +464,8 @@ namespace CopilotSessions
         public void SetCompact(bool compact, bool save = true)
         {
             if (updatingPreferences) return;
-            if (save && !SavePreferences(compact, Appearance, OpacityPercent))
+            if (save && !SavePreferences(compact, Appearance, OpacityPercent,
+                                         InterfaceFontFamily, InterfaceFontSize))
             {
                 SynchronizePreferenceControls();
                 return;
@@ -380,6 +476,7 @@ namespace CopilotSessions
                 comfortableHeight = Window.Height;
             }
             IsCompact = compact;
+            Window.Resources["HeadingFontSize"] = (double)(InterfaceFontSize + (compact ? 5 : 12));
             Window.Resources["DetailVisibility"] = compact ? Visibility.Collapsed : Visibility.Visible;
             Window.Resources["SessionRowHeight"] = compact ? 38.0 : 70.0;
             Window.Resources["CellPadding"] = new Thickness(compact ? 9 : 18, 0, compact ? 9 : 18, 0);
@@ -388,20 +485,19 @@ namespace CopilotSessions
             Element("RootLayout").Margin = compact ? new Thickness(12) : new Thickness(24, 20, 24, 16);
             Element("HeaderLayout").Margin = new Thickness(0, 0, 0, compact ? 12 : 22);
             Element("BrandIcon").Visibility = compact ? Visibility.Collapsed : Visibility.Visible;
-            ((TextBlock)Window.FindName("Heading")).FontSize = compact ? 18 : 25;
             ((ToggleButton)Window.FindName("Pin")).Content = compact ? "Pin" : "Always on top";
             Grid.Columns[1].Width = compact ? 112 : 155;
             Grid.Columns[2].Width = compact ? 124 : 156;
             Grid.Columns[0].MinWidth = compact ? 100 : 170;
             Grid.Columns[3].Visibility = compact ? Visibility.Collapsed : Visibility.Visible;
-            Window.MinWidth = compact ? 420 : 640;
-            Window.MinHeight = compact ? 230 : 380;
+            UpdateMinimumSize();
             Window.Width = compact ? 480 : comfortableWidth;
             Window.Height = compact ? 300 : comfortableHeight;
             SynchronizePreferenceControls();
         }
 
-        private bool SavePreferences(bool compact, AppearancePreference appearance, int opacity)
+        private bool SavePreferences(bool compact, AppearancePreference appearance, int opacity,
+                                     string fontFamily, int fontSize)
         {
             try
             {
@@ -410,7 +506,8 @@ namespace CopilotSessions
                 try
                 {
                     File.WriteAllText(scratch, new JavaScriptSerializer().Serialize(
-                        new { compact = compact, appearance = appearance.ToString().ToLowerInvariant(), opacity = opacity }));
+                        new { compact = compact, appearance = appearance.ToString().ToLowerInvariant(),
+                              opacity = opacity, font_family = fontFamily, font_size = fontSize }));
                     if (File.Exists(preferencesPath)) File.Replace(scratch, preferencesPath, null);
                     else File.Move(scratch, preferencesPath);
                 }

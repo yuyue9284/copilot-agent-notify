@@ -541,6 +541,22 @@ public static class GadgetUiTests
         Check(slider.Value == percent && app.OpacityPercent == percent, "Opacity slider did not apply its integer value");
     }
 
+    private static void SetInterfaceFont(SessionWindow app, string family, int size)
+    {
+        var button = (Button)app.Window.FindName("AppearanceButton");
+        if (!button.ContextMenu.IsOpen) Invoke(button);
+        var families = (ComboBox)app.Window.FindName("InterfaceFontFamily");
+        var sizes = (Slider)app.Window.FindName("InterfaceFontSize");
+        families.SelectedItem = family;
+        Pump();
+        var range = (IRangeValueProvider)UIElementAutomationPeer.CreatePeerForElement(sizes)
+            .GetPattern(PatternInterface.RangeValue);
+        range.SetValue(size);
+        Pump();
+        Check(app.InterfaceFontFamily == family && app.InterfaceFontSize == size,
+              "Font controls did not apply the selected family and size");
+    }
+
     private static void Press(UIElement target, Key key)
     {
         var menu = target as ContextMenu;
@@ -560,17 +576,20 @@ public static class GadgetUiTests
     {
         var menu = ((Button)app.Window.FindName("AppearanceButton")).ContextMenu;
         var slider = (Slider)app.Window.FindName("AppearanceOpacity");
+        var fontFamily = (ComboBox)app.Window.FindName("InterfaceFontFamily");
+        var fontSize = (Slider)app.Window.FindName("InterfaceFontSize");
         var focus = Keyboard.FocusedElement as FrameworkElement;
         var hover = Mouse.DirectlyOver as FrameworkElement;
         var popup = PresentationSource.FromVisual(menu) as HwndSource;
         IntPtr foreground = GetForegroundWindow();
         uint process;
         GetWindowThreadProcessId(foreground, out process);
-        return String.Format("focus={0}/{1}; hover={2}/{3}; active={4}; menuOpen={5}; popupSource={6}; popupForeground={7}; sliderFocus={8}; rootForeground={9}; nativeFocusRoot={10}; nativeFocusPopup={11}; foregroundOtherProcess={12}; foregroundZero={13}",
+        return String.Format("focus={0}/{1}; hover={2}/{3}; active={4}; menuOpen={5}; popupSource={6}; popupForeground={7}; sliderFocus={8}; fontFamilyFocus={9}; fontSizeFocus={10}; rootForeground={11}; nativeFocusRoot={12}; nativeFocusPopup={13}; foregroundOtherProcess={14}; foregroundZero={15}",
             focus == null ? "null" : focus.GetType().Name, focus == null ? "" : focus.Name,
             hover == null ? "null" : hover.GetType().Name, hover == null ? "" : hover.Name,
             app.Window.IsActive, menu.IsOpen, popup != null,
             popup != null && GetForegroundWindow() == popup.Handle, slider.IsKeyboardFocusWithin,
+            fontFamily.IsKeyboardFocusWithin, fontSize.IsKeyboardFocusWithin,
             GetForegroundWindow() == new WindowInteropHelper(app.Window).Handle,
             GetFocus() == new WindowInteropHelper(app.Window).Handle, popup != null && GetFocus() == popup.Handle,
             foreground != IntPtr.Zero && process != GetCurrentProcessId(), foreground == IntPtr.Zero);
@@ -606,8 +625,21 @@ public static class GadgetUiTests
         File.WriteAllText(forgottenPath, forgotten);
         var button = (Button)app.Window.FindName("AppearanceButton");
         var slider = (Slider)app.Window.FindName("AppearanceOpacity");
+        var fontFamily = (ComboBox)app.Window.FindName("InterfaceFontFamily");
+        var fontSize = (Slider)app.Window.FindName("InterfaceFontSize");
+        string alternateFont = fontFamily.Items.Cast<string>().First(
+            name => !String.Equals(name, SessionWindow.DefaultInterfaceFontFamily,
+                                   StringComparison.CurrentCultureIgnoreCase));
         Check(UIElementAutomationPeer.CreatePeerForElement(button).GetName() == "Appearance",
               "Appearance button has no discoverable automation name");
+        Check(UIElementAutomationPeer.CreatePeerForElement(fontFamily).GetName() == "Interface font family" &&
+              UIElementAutomationPeer.CreatePeerForElement(fontSize).GetName() == "Interface font size",
+              "Font controls have no discoverable automation names");
+        Check(fontFamily.Items.Count > 1 && fontFamily.SelectedItem.ToString() == SessionWindow.DefaultInterfaceFontFamily,
+              "Installed-font dropdown did not initialize to the default");
+        Check(fontSize.Minimum == 10 && fontSize.Maximum == 18 && fontSize.IsSnapToTickEnabled &&
+              fontSize.TickFrequency == 1 && app.InterfaceFontSize == SessionWindow.DefaultInterfaceFontSize,
+              "Font-size slider range/default is incorrect");
         var focusTrace = new List<string>();
         KeyboardFocusChangedEventHandler traceFocus = delegate(object sender, KeyboardFocusChangedEventArgs args)
         {
@@ -645,6 +677,14 @@ public static class GadgetUiTests
             Check(app.OpacityPercent == 89, "Keyboard Left did not adjust opacity");
             Press(slider, Key.Right);
             Check(app.OpacityPercent == 90, "Keyboard Right did not restore opacity");
+            Press(button.ContextMenu, Key.Tab);
+            Check(fontFamily.IsKeyboardFocusWithin, "Second Tab does not reach the font-family dropdown");
+            Press(button.ContextMenu, Key.Tab);
+            Check(fontSize.IsKeyboardFocusWithin, "Third Tab does not reach the font-size slider");
+            Press(fontSize, Key.Left);
+            Check(app.InterfaceFontSize == 12, "Keyboard Left did not adjust font size");
+            Press(fontSize, Key.Right);
+            Check(app.InterfaceFontSize == 13, "Keyboard Right did not restore font size");
             Press(button.ContextMenu, Key.Escape);
             Check(!button.ContextMenu.IsOpen, "Escape did not close Appearance");
             Check(Keyboard.FocusedElement == focus, "Appearance menu did not restore prior focus");
@@ -693,6 +733,13 @@ public static class GadgetUiTests
         Check(app.Backdrop.OpacityAlpha == 191, "75% alpha must be 191");
         Check(slider.Minimum == 50 && slider.Maximum == 100 && slider.IsSnapToTickEnabled && slider.TickFrequency == 1,
               "Opacity slider range/snapping changed");
+        SetInterfaceFont(app, alternateFont, 16);
+        Check(app.Window.FontFamily.Source == alternateFont && app.Window.FontSize == 16 &&
+              button.ContextMenu.FontFamily.Source == alternateFont && button.ContextMenu.FontSize == 16,
+              "Selected font did not apply to the window and appearance popup");
+        Check((double)app.Window.Resources["SmallFontSize"] == 14 &&
+              (double)app.Window.Resources["SummaryFontSize"] == 27,
+              "Font size did not scale secondary and summary text");
         Press(button.ContextMenu, Key.Escape);
         ((ToggleButton)app.Window.FindName("Compact")).IsChecked = true;
         Pump();
@@ -700,7 +747,9 @@ public static class GadgetUiTests
         try
         {
             Check(restored.IsCompact && restored.Appearance == AppearancePreference.Translucent &&
-                  restored.OpacityPercent == 75, "Appearance/opacity/compact did not survive reload together");
+                  restored.OpacityPercent == 75 && restored.InterfaceFontFamily == alternateFont &&
+                  restored.InterfaceFontSize == 16,
+                  "Appearance/opacity/font/compact preferences did not survive reload together");
         }
         finally { restored.Window.Close(); }
         foreach (string mode in new[] { "Acrylic", "Solid", "Auto", "Translucent" })
@@ -719,6 +768,8 @@ public static class GadgetUiTests
             }
             CheckNativeAppearance(app);
             Check(app.IsCompact, "Changing appearance reset the compact layout");
+            Check(app.InterfaceFontFamily == alternateFont && app.InterfaceFontSize == 16,
+                  "Changing appearance reset the interface font");
             Check((GetWindowLong(new WindowInteropHelper(app.Window).Handle, -20) & 8) != 0,
                   "Changing appearance lost pin state");
         }
@@ -747,7 +798,7 @@ public static class GadgetUiTests
         app.SetCompact(false, false);
         app.Apply(new Snapshot { rows = new SessionData[0], errors = new string[0] });
         app.Apply(Sample());
-        Console.WriteLine("Appearance UI: menu, focus, opacity 50/75/90/100, modes, persistence, pin and minimum widths passed.");
+        Console.WriteLine("Appearance UI: menu, focus, opacity, installed fonts, size scaling, persistence, pin and minimum widths passed.");
     }
 
     private static void TestAppearancePreferences(string directory)
@@ -761,8 +812,10 @@ public static class GadgetUiTests
             var legacy = new SessionWindow(path);
             try
             {
-                Check(legacy.IsCompact && legacy.Appearance == AppearancePreference.Auto && legacy.OpacityPercent == 90,
-                      "Legacy compact-only preference did not default to Auto/90");
+                Check(legacy.IsCompact && legacy.Appearance == AppearancePreference.Auto && legacy.OpacityPercent == 90 &&
+                      legacy.InterfaceFontFamily == SessionWindow.DefaultInterfaceFontFamily &&
+                      legacy.InterfaceFontSize == SessionWindow.DefaultInterfaceFontSize,
+                      "Legacy compact-only preference did not default to Auto/90 and the standard font");
             }
             finally { legacy.Window.Close(); }
             string[] invalid = {
@@ -773,7 +826,12 @@ public static class GadgetUiTests
                 "{\"compact\":true,\"opacity\":75.5}", "{\"compact\":true,\"opacity\":\"90\"}",
                 "{\"compact\":true,\"opacity\":null}", "{\"compact\":true,\"opacity\":true}",
                 "{\"compact\":true,\"opacity\":NaN}", "{\"compact\":true,\"opacity\":Infinity}",
-                "{\"compact\":true,\"opacity\":1e999}"
+                "{\"compact\":true,\"opacity\":1e999}",
+                "{\"compact\":true,\"font_family\":null}", "{\"compact\":true,\"font_family\":1}",
+                "{\"compact\":true,\"font_family\":\"Definitely Missing Font 9284\"}",
+                "{\"compact\":true,\"font_size\":9}", "{\"compact\":true,\"font_size\":19}",
+                "{\"compact\":true,\"font_size\":13.5}", "{\"compact\":true,\"font_size\":\"13\"}",
+                "{\"compact\":true,\"font_size\":null}", "{\"compact\":true,\"font_size\":true}"
             };
             foreach (string json in invalid)
             {
@@ -782,7 +840,9 @@ public static class GadgetUiTests
                 try
                 {
                     bad.Apply(Sample());
-                    Check(!bad.IsCompact && bad.Appearance == AppearancePreference.Auto && bad.OpacityPercent == 90,
+                    Check(!bad.IsCompact && bad.Appearance == AppearancePreference.Auto && bad.OpacityPercent == 90 &&
+                          bad.InterfaceFontFamily == SessionWindow.DefaultInterfaceFontFamily &&
+                          bad.InterfaceFontSize == SessionWindow.DefaultInterfaceFontSize,
                           "Invalid preference was partially accepted: " + json);
                     Check(((FrameworkElement)bad.Window.FindName("ErrorPanel")).Visibility == Visibility.Visible,
                           "Invalid preference was not surfaced: " + json);
@@ -807,6 +867,19 @@ public static class GadgetUiTests
                 ((Slider)failure.Window.FindName("AppearanceOpacity")).Value = 75;
                 Check(failure.OpacityPercent == 90 && ((Slider)failure.Window.FindName("AppearanceOpacity")).Value == 90,
                       "Failed opacity save did not revert the slider");
+                var fontFamily = (ComboBox)failure.Window.FindName("InterfaceFontFamily");
+                string alternateFont = fontFamily.Items.Cast<string>().First(
+                    name => !String.Equals(name, SessionWindow.DefaultInterfaceFontFamily,
+                                           StringComparison.CurrentCultureIgnoreCase));
+                fontFamily.SelectedItem = alternateFont;
+                Check(failure.InterfaceFontFamily == SessionWindow.DefaultInterfaceFontFamily &&
+                      (string)fontFamily.SelectedItem == SessionWindow.DefaultInterfaceFontFamily,
+                      "Failed font-family save did not revert the dropdown");
+                ((Slider)failure.Window.FindName("InterfaceFontSize")).Value = 16;
+                Check(failure.InterfaceFontSize == SessionWindow.DefaultInterfaceFontSize &&
+                      ((Slider)failure.Window.FindName("InterfaceFontSize")).Value ==
+                      SessionWindow.DefaultInterfaceFontSize,
+                      "Failed font-size save did not revert the slider");
                 Press(button.ContextMenu, Key.Escape);
                 ((ToggleButton)failure.Window.FindName("Compact")).IsChecked = true;
                 Check(!failure.IsCompact && ((ToggleButton)failure.Window.FindName("Compact")).IsChecked == false,
