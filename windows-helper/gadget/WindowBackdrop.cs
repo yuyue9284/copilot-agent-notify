@@ -36,6 +36,7 @@ namespace CopilotSessions
         internal byte OpacityAlpha { get { return (byte)Math.Round(OpacityPercent * 255.0 / 100, MidpointRounding.AwayFromZero); } }
         internal WindowAppearance Mode { get; private set; }
         internal bool IsEnabled { get { return Mode == WindowAppearance.Acrylic; } }
+        internal event EventHandler Changed;
 
         internal WindowBackdrop(Window window, IBackdropNative native = null)
         {
@@ -152,6 +153,7 @@ namespace CopilotSessions
                 desired = WindowAppearance.Opaque;
             }
             Mode = desired;
+            if (Changed != null) Changed(this, EventArgs.Empty);
         }
 
         private WindowAppearance TryAcrylic()

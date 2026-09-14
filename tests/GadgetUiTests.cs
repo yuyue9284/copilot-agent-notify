@@ -189,6 +189,20 @@ public static class GadgetUiTests
         else Check((style & 0x80000) == 0, "Opaque/Acrylic modes must restore normal composition");
     }
 
+    private static void CheckPopupAppearance(SessionWindow app)
+    {
+        byte expected = app.Backdrop.Mode == WindowAppearance.Translucent
+            ? app.Backdrop.OpacityAlpha
+            : app.Backdrop.Mode == WindowAppearance.Acrylic ? WindowBackdrop.FallbackAlpha : (byte)255;
+        var menu = ((Button)app.Window.FindName("AppearanceButton")).ContextMenu;
+        var surface = (SolidColorBrush)menu.Resources["PopupSurface"];
+        Check(surface.Color.A == expected, "Settings popup does not follow the effective appearance opacity");
+        Check(((SolidColorBrush)menu.Background).Color == surface.Color,
+              "Settings popup background is not using the shared popup surface");
+        Check(((SolidColorBrush)menu.Resources["PopupBorder"]).Color.A >= surface.Color.A,
+              "Popup border is less visible than its surface");
+    }
+
     private static void CheckActualTopmost(SessionWindow app, Window witness, bool pinned)
     {
         IntPtr gadget = new WindowInteropHelper(app.Window).Handle;
@@ -640,6 +654,10 @@ public static class GadgetUiTests
         Check(fontSize.Minimum == 10 && fontSize.Maximum == 18 && fontSize.IsSnapToTickEnabled &&
               fontSize.TickFrequency == 1 && app.InterfaceFontSize == SessionWindow.DefaultInterfaceFontSize,
               "Font-size slider range/default is incorrect");
+        fontFamily.ApplyTemplate();
+        var fontPopup = (Popup)fontFamily.Template.FindName("PART_Popup", fontFamily);
+        Check(fontPopup != null && fontPopup.AllowsTransparency,
+              "Font picker does not use the custom transparent popup");
         var focusTrace = new List<string>();
         KeyboardFocusChangedEventHandler traceFocus = delegate(object sender, KeyboardFocusChangedEventArgs args)
         {
@@ -726,6 +744,7 @@ public static class GadgetUiTests
                   "Opacity conversion did not round deliberately");
             Check(app.Backdrop.Mode == (effects && percent < 100 ? WindowAppearance.Translucent : WindowAppearance.Opaque),
                   "Unexpected effective mode for configured opacity");
+            CheckPopupAppearance(app);
             CheckNativeAppearance(app);
             Check((GetWindowLong(new WindowInteropHelper(app.Window).Handle, -20) & 8) != 0,
                   "Changing opacity lost pin state");
@@ -740,6 +759,17 @@ public static class GadgetUiTests
         Check((double)app.Window.Resources["SmallFontSize"] == 14 &&
               (double)app.Window.Resources["SummaryFontSize"] == 27,
               "Font size did not scale secondary and summary text");
+        fontFamily.IsDropDownOpen = true;
+        Pump();
+        var dropDownSurface = fontPopup.Child as Border;
+        Check(dropDownSurface != null &&
+              ((SolidColorBrush)dropDownSurface.Background).Color ==
+              ((SolidColorBrush)button.ContextMenu.Resources["PopupSurface"]).Color,
+              "Font dropdown is not using the shared translucent popup surface");
+        Check(Object.ReferenceEquals(fontFamily.ItemContainerStyle,
+                                     app.Window.Resources["FontComboBoxItemStyle"]),
+              "Font dropdown fell back to the stock item chrome");
+        fontFamily.IsDropDownOpen = false;
         Press(button.ContextMenu, Key.Escape);
         ((ToggleButton)app.Window.FindName("Compact")).IsChecked = true;
         Pump();
@@ -757,6 +787,7 @@ public static class GadgetUiTests
             ChooseAppearance(app, mode);
             Check(app.Appearance.ToString() == mode && app.Backdrop.Preference == app.Appearance,
                   "Requested preference was confused with the effective mode");
+            CheckPopupAppearance(app);
             Check(slider.IsEnabled == (mode == "Auto" || mode == "Translucent"), "Incorrect slider enablement");
             if (mode == "Solid") Check(app.Backdrop.Mode == WindowAppearance.Opaque, "Solid choice is not opaque");
             if (mode == "Acrylic" && effects)
@@ -1105,6 +1136,11 @@ public static class GadgetUiTests
             app.Backdrop.Refresh(SystemParameters.HighContrast);
             Invoke((Button)app.Window.FindName("AppearanceButton"));
             CaptureScreen(background, stem + "-menu.png");
+            var fontFamily = (ComboBox)app.Window.FindName("InterfaceFontFamily");
+            fontFamily.IsDropDownOpen = true;
+            Pump();
+            CaptureScreen(background, stem + "-font-menu.png");
+            fontFamily.IsDropDownOpen = false;
             Press(((Button)app.Window.FindName("AppearanceButton")).ContextMenu, Key.Escape);
             app.SetCompact(true, false);
             Pump();

@@ -190,8 +190,10 @@ namespace CopilotSessions
             InterfaceFontSize = DefaultInterfaceFontSize;
             bool initialCompact = LoadPreferences();
             Backdrop = new WindowBackdrop(Window);
+            Backdrop.Changed += delegate { UpdatePopupAppearance(); };
             Backdrop.Configure(Appearance, OpacityPercent);
             InitializeAppearance();
+            UpdatePopupAppearance();
             ApplyInterfaceFont();
             SetCompact(initialCompact, false);
             compact.Checked += delegate { SetCompact(true); };
@@ -268,6 +270,7 @@ namespace CopilotSessions
             };
             menu.Opened += delegate
             {
+                UpdatePopupAppearance();
                 foreach (MenuItem item in menu.Items.OfType<MenuItem>())
                     if (item.IsChecked) { item.Focus(); break; }
             };
@@ -321,6 +324,7 @@ namespace CopilotSessions
                     ChangeInterfaceFont(selected, InterfaceFontSize);
                 else SynchronizePreferenceControls();
             };
+            fontFamily.DropDownOpened += delegate { UpdatePopupAppearance(); };
             fontSize.ValueChanged += delegate
             {
                 if (updatingPreferences) return;
@@ -338,6 +342,7 @@ namespace CopilotSessions
                 Appearance = appearance;
                 OpacityPercent = opacity;
                 Backdrop.Configure(appearance, opacity);
+                UpdatePopupAppearance();
             }
             SynchronizePreferenceControls();
         }
@@ -368,6 +373,25 @@ namespace CopilotSessions
             Window.Resources["EmptyIconFontSize"] = (double)(InterfaceFontSize + 17);
             Window.Resources["HeadingFontSize"] = (double)(InterfaceFontSize + (IsCompact ? 5 : 12));
             UpdateMinimumSize();
+        }
+
+        private void UpdatePopupAppearance()
+        {
+            byte alpha = 255;
+            if (Backdrop.Mode == WindowAppearance.Translucent) alpha = Backdrop.OpacityAlpha;
+            else if (Backdrop.Mode == WindowAppearance.Acrylic) alpha = WindowBackdrop.FallbackAlpha;
+            SetPopupBrush("PopupSurface", Color.FromArgb(alpha, 27, 37, 51));
+            SetPopupBrush("PopupHoverSurface", Color.FromArgb((byte)Math.Min(255, alpha + 18), 49, 70, 94));
+            SetPopupBrush("PopupSelectedSurface", Color.FromArgb((byte)Math.Min(255, alpha + 12), 27, 59, 60));
+            SetPopupBrush("PopupBorder", Color.FromArgb((byte)Math.Min(255, alpha + 28), 67, 84, 106));
+        }
+
+        private void SetPopupBrush(string key, Color color)
+        {
+            var brush = new SolidColorBrush(color);
+            brush.Freeze();
+            Window.Resources[key] = brush;
+            ((Button)Window.FindName("AppearanceButton")).ContextMenu.Resources[key] = brush;
         }
 
         private void UpdateMinimumSize()

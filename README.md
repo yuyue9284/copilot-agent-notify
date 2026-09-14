@@ -106,7 +106,9 @@ The same menu includes an installed-font dropdown and a **10–18** base font-si
 slider. The selected family applies to the full textual interface; icon glyphs
 retain their required symbol fonts. Headings, summary counts, secondary text,
 table headers, status badges, and both comfortable and compact layouts scale
-proportionally with the base size.
+proportionally with the base size. The settings panel and font list use the same
+dark translucent surface as the selected appearance rather than native light
+dropdown chrome; Solid and accessibility-forced opaque modes keep them opaque.
 
 The **Translucent opacity** slider ranges from **50–100%**, default **90%**
 (native alpha 230/255). It adjusts plain translucency and automatic fallback, not
