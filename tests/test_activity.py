@@ -76,24 +76,39 @@ class ReducerTests(unittest.TestCase):
         self.assertEqual(self.feed(busy(), event("assistant.message", toolRequests=[{}]),
                                    event("assistant.turn_end")), (1, 0))
 
-    def test_explicit_final_answer_and_matching_turn_end_without_stop_hook(self):
-        self.assertEqual(self.feed(busy(), event("assistant.message", phase="final_answer",
-                                                turnId="5", toolRequests=[])), (1, 0))
-        self.assertEqual(self.feed(event("assistant.turn_end", turnId="5")), (0, 0))
-        self.assertEqual(self.feed(busy()), (1, 0))
+    def test_matching_final_message_and_turn_end_without_stop_hook(self):
+        for phase in (None, "final_answer"):
+            self.state.reset()
+            message = event("assistant.message", turnId="5", toolRequests=[])
+            if phase:
+                message["data"]["phase"] = phase
+            self.assertEqual(self.feed(busy(), message), (1, 0))
+            self.assertEqual(self.feed(event("assistant.turn_end", turnId="5")), (0, 0))
+            self.assertEqual(self.feed(busy()), (1, 0))
 
-    def test_final_fallback_requires_matching_explicit_phase(self):
-        for phase in (None, "commentary", "final_answer"):
+    def test_final_fallback_requires_matching_message_turn(self):
+        for phase in (None, "final_answer"):
             self.state.reset()
             self.assertEqual(self.feed(busy(), event("assistant.message", phase=phase,
                                                     turnId="5", toolRequests=[]),
                                        event("assistant.turn_end", turnId="other")), (1, 0))
-            if phase != "final_answer":
-                self.assertEqual(self.feed(event("assistant.turn_end", turnId="5")), (1, 0))
+            self.assertEqual(self.feed(event("assistant.turn_end", turnId="5")), (0, 0))
+        self.state.reset()
+        self.assertEqual(self.feed(busy(), event("assistant.message", phase="commentary",
+                                                turnId="5", toolRequests=[]),
+                                   event("assistant.turn_end", turnId="5")), (1, 0))
+
+    def test_later_tool_message_cancels_unmarked_final_candidate(self):
+        self.assertEqual(self.feed(
+            busy(),
+            event("assistant.message", turnId="5", toolRequests=[]),
+            event("assistant.message", turnId="5", toolRequests=[{}]),
+            event("assistant.turn_end", turnId="5"),
+        ), (1, 0))
 
     def test_final_fallback_preserves_children_and_pending_hooks(self):
         self.feed(busy(), event("subagent.started", agent="child"),
-                  event("assistant.message", phase="final_answer", turnId="5", toolRequests=[]))
+                  event("assistant.message", turnId="5", toolRequests=[]))
         self.assertEqual(self.feed(event("assistant.turn_end", turnId="5")), (1, 0))
         self.assertEqual(self.feed(event("subagent.completed", agent="child")), (0, 0))
         self.feed(busy(), event("assistant.message", phase="final_answer", turnId="6"),
@@ -102,7 +117,7 @@ class ReducerTests(unittest.TestCase):
         self.assertEqual(self.feed(finish()[2]), (0, 0))
 
     def test_final_fallback_rejects_child_end_and_running_root_tool(self):
-        self.feed(busy(), event("assistant.message", phase="final_answer", turnId="5"))
+        self.feed(busy(), event("assistant.message", turnId="5"))
         self.assertEqual(self.feed(event("assistant.turn_end", agent="child", turnId="5")), (1, 0))
         self.feed(event("tool.execution_start", toolCallId="running"))
         self.assertEqual(self.feed(event("assistant.turn_end", turnId="5")), (1, 0))
@@ -183,7 +198,7 @@ class ReducerTests(unittest.TestCase):
 
     def test_completed_child_does_not_erase_later_attention(self):
         self.feed(event("assistant.turn_start", agent="child"),
-                  event("assistant.message", agent="child", phase="final_answer", turnId="1"),
+                  event("assistant.message", agent="child", turnId="1"),
                   event("assistant.turn_end", agent="child", turnId="1"))
         self.assertEqual(self.feed(event("hook.start", hookType="notification", input={
             "sessionId": "child", "notification_type": "permission_prompt",
@@ -192,7 +207,7 @@ class ReducerTests(unittest.TestCase):
 
     def test_completed_child_ignores_duplicate_final_turn_end(self):
         self.feed(event("assistant.turn_start", agent="child"),
-                  event("assistant.message", agent="child", phase="final_answer", turnId="1"),
+                  event("assistant.message", agent="child", turnId="1"),
                   event("assistant.turn_end", agent="child", turnId="1"),
                   event("hook.start", hookType="notification", input={
                       "sessionId": "child", "notification_type": "permission_prompt",
@@ -247,6 +262,13 @@ class ReducerTests(unittest.TestCase):
             self.assertEqual(self.feed(busy(), event("subagent.started", agent="child"),
                                        event(kind)), (0, 0))
         self.assertEqual(self.feed(busy()), (1, 0))
+
+    def test_resumed_session_finishes_with_legacy_no_phase_message(self):
+        self.feed(busy(), event("tool.execution_start", toolCallId="abandoned"),
+                  event("session.shutdown"), event("session.resume"))
+        self.assertEqual(self.feed(busy(), event("assistant.message", turnId="0",
+                                                toolRequests=[]),
+                                   event("assistant.turn_end", turnId="0")), (0, 0))
 
 
 class TranscriptTests(Files):
@@ -539,8 +561,7 @@ class RuntimeTests(Files):
         self.wait_for(lambda s: s["tabs"][0]["name"] == activity.prefix((1, 0)) + "work"
                       and s["panes"][0]["title"] == activity.prefix((1, 0)) + "pane1")
         self.write_events(path, [
-            event("assistant.message", agent="child", phase="final_answer", turnId="7",
-                  toolRequests=[]),
+            event("assistant.message", agent="child", turnId="7", toolRequests=[]),
             event("assistant.turn_end", agent="child", turnId="7"),
         ], "a")
         self.wait_for(lambda s: s["tabs"][0]["name"] == "work"
@@ -631,6 +652,50 @@ class RuntimeTests(Files):
             wait_for_signal(b"\x1b]9;4;3;0\x07")
             self.write_events(path, [*finish("a")[:2],
                                     event("hook.end", hookInvocationId="stop", success=False)], "a")
+            wait_for_signal(b"\x1b]9;4;0;0\x07\x07")
+            self.wait_for(lambda s: s["tabs"][0]["name"] == "work")
+        finally:
+            client.stdin.close()
+            client.wait(timeout=5)
+            os.close(slave)
+            os.close(master)
+
+    def test_resumed_no_phase_completion_clears_tab_and_outer_terminal_progress(self):
+        if not sys.platform.startswith("linux"):
+            self.skipTest("Linux outer-terminal PTY integration")
+        import pty
+        import select
+        client_script = self.directory / "zellij"
+        client_script.write_text("#!/bin/sh\nread line\n")
+        client_script.chmod(0o700)
+        master, slave = pty.openpty()
+        self.env["WT_SESSION"] = "isolated-progress-test"
+        client = subprocess.Popen([str(client_script), "attach", self.session],
+                                  stdin=subprocess.PIPE, stdout=slave, stderr=slave,
+                                  env=self.env)
+
+        def wait_for_signal(expected):
+            output = b""
+            deadline = time.monotonic() + 15
+            while expected not in output and time.monotonic() < deadline:
+                if select.select([master], [], [], 0.2)[0]:
+                    output += os.read(master, 4096)
+            self.assertIn(expected, output)
+
+        try:
+            path = self.transcript("a", [
+                busy(),
+                event("tool.execution_start", toolCallId="abandoned"),
+                event("session.shutdown"),
+                event("session.resume"),
+                busy(),
+            ])
+            self.assert_process(self.launch())
+            wait_for_signal(b"\x1b]9;4;3;0\x07")
+            self.write_events(path, [
+                event("assistant.message", turnId="1", toolRequests=[]),
+                event("assistant.turn_end", turnId="1"),
+            ], "a")
             wait_for_signal(b"\x1b]9;4;0;0\x07\x07")
             self.wait_for(lambda s: s["tabs"][0]["name"] == "work")
         finally:

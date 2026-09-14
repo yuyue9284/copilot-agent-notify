@@ -62,7 +62,7 @@ class ScannerTests(unittest.TestCase):
         directory = self.session(events=[event("assistant.turn_start")])
         self.assertEqual(self.status(), "In progress")
         reader = next(iter(self.scanner.readers.values()))[0]
-        self.write(directory, [event("assistant.message", phase="final_answer", turnId="1"),
+        self.write(directory, [event("assistant.message", turnId="1"),
                                event("assistant.turn_end", turnId="1")], "a")
         self.assertEqual(self.status(), "Done")
         self.assertIs(reader, next(iter(self.scanner.readers.values()))[0])

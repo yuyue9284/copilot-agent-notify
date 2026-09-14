@@ -479,18 +479,19 @@ unavailable and exits rather than retrying forever.
   again, including stop-hook continuations. This is transcript-observed state,
   not a contractual CLI "request complete" API: a stop hook that subsequently
   blocks can cause a brief idle interval before continuation appears.
-- When stop hooks are absent, an explicit `phase: final_answer` message without
-  tool requests followed by the root's matching `assistant.turn_end` also ends
-  root work. This fallback requires a turn ID, no running root tools, and no
-  pending stop hook. Background children still keep the session working.
-  Unmarked messages, commentary, and ordinary tool-turn endings do not qualify.
+- When stop hooks are absent, an assistant message without tool requests followed
+  by that actor's matching `assistant.turn_end` also ends its work. This supports
+  both explicit `phase: final_answer` records and older records without a phase.
+  The fallback requires a turn ID, no running tools for that actor, and no pending
+  stop hook. A later tool-bearing message cancels the candidate, and background
+  children still keep the root session working.
 - Root background children keep the session working until their
   `subagent.completed`/`subagent.failed` event. Their completion cannot clear an
   active parent. Mixed child metadata is correlated by the spawning tool ID.
   A child's new `assistant.turn_start` also restores its working state after
   completion, since resumed agents may not emit another `subagent.started`.
-  Its next final response plus stop-hook completion, or explicit final-answer
-  phase plus matching turn end, clears only that child.
+  Its next final response plus stop-hook completion, or a no-tool response plus
+  matching turn end, clears only that child.
 - `ask_user` waits clear on the matching tool completion. Permission/input
   notification hooks also show attention for children, independently of
   `COPILOT_NOTIFY_SUBAGENTS`. Without an explicit tool correlation ID, attention

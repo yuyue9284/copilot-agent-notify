@@ -309,14 +309,15 @@ class Activity:
         elif kind == "assistant.message" and root:
             self.final = not bool(data.get("toolRequests"))
             self.final_turn = (data.get("turnId") if self.final
-                               and data.get("phase") == "final_answer" else None)
+                               and data.get("phase") in (None, "final_answer") else None)
         elif kind == "assistant.message":
             if data.get("toolRequests"):
                 self.child_final.discard(actor)
                 self.child_final_turns.pop(actor, None)
             else:
                 self.child_final.add(actor)
-                if data.get("phase") == "final_answer" and data.get("turnId") is not None:
+                if (data.get("turnId") is not None
+                        and data.get("phase") in (None, "final_answer")):
                     self.child_final_turns[actor] = data["turnId"]
                 else:
                     self.child_final_turns.pop(actor, None)
