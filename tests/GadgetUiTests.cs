@@ -1407,6 +1407,34 @@ public static class GadgetUiTests
         Pump();
     }
 
+    private static void TestColumnResizing(SessionWindow app)
+    {
+        app.SetCompact(false, false);
+        app.Apply(Sample());
+        Pump();
+        Check(app.Grid.CanUserResizeColumns, "Session table does not allow column resizing");
+        var headers = Descendants<DataGridColumnHeader>(app.Grid)
+            .Where(candidate => candidate.Column != null).ToArray();
+        Check(headers.Length == app.Grid.Columns.Count, "Not all visible columns have resizeable headers");
+        var header = headers.Single(item => item.Column == app.Grid.Columns[1]);
+        header.ApplyTemplate();
+        var left = (Thumb)header.Template.FindName("PART_LeftHeaderGripper", header);
+        var right = (Thumb)header.Template.FindName("PART_RightHeaderGripper", header);
+        Check(left != null && right != null && left.Cursor == Cursors.SizeWE && right.Cursor == Cursors.SizeWE,
+              "Column header resize grippers are missing or do not advertise horizontal resizing");
+        double before = app.Grid.Columns[1].ActualWidth;
+        right.RaiseEvent(new DragDeltaEventArgs(36, 0) { RoutedEvent = Thumb.DragDeltaEvent });
+        Pump();
+        Check(app.Grid.Columns[1].ActualWidth >= before + 30,
+              "Dragging the header divider did not resize the column");
+        app.SetCompact(true, false);
+        app.SetCompact(false, false);
+        Pump();
+        Check(app.Grid.Columns[0].Width.IsStar && app.Grid.Columns[1].Width.Value == 155 &&
+              app.Grid.Columns[2].Width.Value == 156 && app.Grid.Columns[3].Width.Value == 106,
+              "Switching layouts did not restore the documented default column widths");
+    }
+
     [STAThread]
     public static int Main()
     {
@@ -1424,6 +1452,7 @@ public static class GadgetUiTests
             TestAppearance(app, preferences);
             TestAppearanceMenuAdjustment(app);
             TestAppearancePreferences(directory);
+            TestColumnResizing(app);
             Check(app.Window.Icon != null, "Missing application icon");
             foreach (DataGridColumn column in app.Grid.Columns)
             {

@@ -140,9 +140,12 @@ desktop shortcut. Its multi-resolution assets are generated locally by
 `windows-helper/gadget/generate_icon.py`, without downloading third-party artwork.
 
 Click **Session**, **Environment**, **Status**, or **ID** to sort; click the same
-header again to reverse direction. The arrow shows the current direction, and
-both the chosen sort and selection survive live updates. Status sorts by attention,
-working, loading, unknown, then done, rather than alphabetically.
+header again to reverse direction. Drag a header divider to resize its column.
+The arrow shows the current direction, and both the chosen sort and selection
+survive live updates. Status sorts by attention, working, loading, unknown, then
+done, rather than alphabetically. Custom column widths last while the current
+layout remains active; switching layouts or restarting restores that layout's
+defaults.
 Both layouts use slim, rounded dark scrollbars with hover and drag feedback;
 mouse-wheel scrolling, track paging, dragging, and keyboard navigation remain available.
 

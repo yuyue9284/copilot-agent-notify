@@ -510,8 +510,10 @@ namespace CopilotSessions
             Element("HeaderLayout").Margin = new Thickness(0, 0, 0, compact ? 12 : 22);
             Element("BrandIcon").Visibility = compact ? Visibility.Collapsed : Visibility.Visible;
             ((ToggleButton)Window.FindName("Pin")).Content = compact ? "Pin" : "Always on top";
+            Grid.Columns[0].Width = new DataGridLength(1, DataGridLengthUnitType.Star);
             Grid.Columns[1].Width = compact ? 112 : 155;
             Grid.Columns[2].Width = compact ? 124 : 156;
+            Grid.Columns[3].Width = 106;
             Grid.Columns[0].MinWidth = compact ? 100 : 170;
             Grid.Columns[3].Visibility = compact ? Visibility.Collapsed : Visibility.Visible;
             UpdateMinimumSize();

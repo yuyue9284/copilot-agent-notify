@@ -129,13 +129,48 @@
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="DataGridColumnHeader">
-            <Border x:Name="Surface" Background="{TemplateBinding Background}"
-                    Padding="{TemplateBinding Padding}" BorderBrush="{DynamicResource SurfaceBorder}" BorderThickness="0,0,0,1">
-              <StackPanel Orientation="Horizontal">
-                <ContentPresenter VerticalAlignment="Center"/>
-                <TextBlock x:Name="Arrow" Text="" Margin="7,0,0,0" Foreground="#74D9C7"/>
-              </StackPanel>
-            </Border>
+            <Grid>
+              <Border x:Name="Surface" Background="{TemplateBinding Background}"
+                      Padding="{TemplateBinding Padding}" BorderBrush="{DynamicResource SurfaceBorder}"
+                      BorderThickness="0,0,0,1">
+                <StackPanel Orientation="Horizontal">
+                  <ContentPresenter VerticalAlignment="Center"/>
+                  <TextBlock x:Name="Arrow" Text="" Margin="7,0,0,0" Foreground="#74D9C7"/>
+                </StackPanel>
+              </Border>
+              <Thumb x:Name="PART_LeftHeaderGripper" Width="8" HorizontalAlignment="Left"
+                     Cursor="SizeWE" Background="Transparent">
+                <Thumb.Template>
+                  <ControlTemplate TargetType="Thumb">
+                    <Border x:Name="Grip" Width="2" HorizontalAlignment="Left" Background="Transparent"/>
+                    <ControlTemplate.Triggers>
+                      <Trigger Property="IsMouseOver" Value="True">
+                        <Setter TargetName="Grip" Property="Background" Value="#86E3D1"/>
+                      </Trigger>
+                      <Trigger Property="IsDragging" Value="True">
+                        <Setter TargetName="Grip" Property="Background" Value="#B9FFF0"/>
+                      </Trigger>
+                    </ControlTemplate.Triggers>
+                  </ControlTemplate>
+                </Thumb.Template>
+              </Thumb>
+              <Thumb x:Name="PART_RightHeaderGripper" Width="8" HorizontalAlignment="Right"
+                     Cursor="SizeWE" Background="Transparent">
+                <Thumb.Template>
+                  <ControlTemplate TargetType="Thumb">
+                    <Border x:Name="Grip" Width="2" HorizontalAlignment="Right" Background="Transparent"/>
+                    <ControlTemplate.Triggers>
+                      <Trigger Property="IsMouseOver" Value="True">
+                        <Setter TargetName="Grip" Property="Background" Value="#86E3D1"/>
+                      </Trigger>
+                      <Trigger Property="IsDragging" Value="True">
+                        <Setter TargetName="Grip" Property="Background" Value="#B9FFF0"/>
+                      </Trigger>
+                    </ControlTemplate.Triggers>
+                  </ControlTemplate>
+                </Thumb.Template>
+              </Thumb>
+            </Grid>
             <ControlTemplate.Triggers>
               <Trigger Property="IsMouseOver" Value="True">
                 <Setter TargetName="Surface" Property="Background" Value="#243045"/>
@@ -522,7 +557,8 @@
       <Grid>
         <DataGrid x:Name="Sessions" Background="Transparent" BorderThickness="0"
                   AutoGenerateColumns="False" CanUserAddRows="False" CanUserDeleteRows="False"
-                  CanUserReorderColumns="False" CanUserSortColumns="True" IsReadOnly="True"
+                  CanUserReorderColumns="False" CanUserResizeColumns="True"
+                  CanUserSortColumns="True" IsReadOnly="True"
                   SelectionMode="Single" SelectionUnit="FullRow" HeadersVisibility="Column"
                   GridLinesVisibility="None" RowHeaderWidth="0" HorizontalScrollBarVisibility="Auto"
                   VerticalScrollBarVisibility="Auto" EnableRowVirtualization="True">
