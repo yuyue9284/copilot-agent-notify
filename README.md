@@ -77,11 +77,15 @@ under `%LOCALAPPDATA%\CopilotAgentNotify\gadget`, run:
 ```
 
 The installer validates native Python 3.9+ and targets `CopilotSessions.exe`
-directly with `--python` in the shortcut. It preserves existing `gadget.json`,
+directly with `--python` in desktop and Start Menu shortcuts. The Start Menu
+shortcut registers the `CopilotAgentNotify.CopilotSessions` application identity,
+so gadget-generated Windows notifications are labeled **Copilot Sessions**.
+It preserves existing `gadget.json`,
 `gadget-ui.json`, `gadget-forgotten.json`, and owner caches.
 This does not enable automatic startup. Rebuild and reinstall after updating the
 repository. Close an open gadget before updating it. To
-uninstall, remove that gadget directory and the desktop shortcut. If your
+uninstall, remove that gadget directory and both Copilot Sessions shortcuts from
+the desktop and Start Menu. If your
 PowerShell authorization blocks scripts on a WSL UNC path, use an approved local
 Windows checkout/build location or request administrator guidance; do not bypass
 or change execution policy. `gadget.cmd` can launch an already-built app but

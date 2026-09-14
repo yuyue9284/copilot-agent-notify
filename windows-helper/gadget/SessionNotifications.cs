@@ -14,6 +14,7 @@ namespace CopilotSessions
 
     public sealed class NativeSessionNotifier : ISessionNotifier
     {
+        public const string AppId = "CopilotAgentNotify.CopilotSessions";
         private readonly string executable;
 
         public NativeSessionNotifier(string directory)
@@ -40,7 +41,8 @@ namespace CopilotSessions
                     var info = new ProcessStartInfo(executable,
                         NativeGadgetEnvironment.Quote(title) + " " +
                         NativeGadgetEnvironment.Quote(message) + " " +
-                        NativeGadgetEnvironment.Quote(shortId))
+                        NativeGadgetEnvironment.Quote(shortId) + " " +
+                        NativeGadgetEnvironment.Quote(AppId))
                     {
                         UseShellExecute = false,
                         CreateNoWindow = true,

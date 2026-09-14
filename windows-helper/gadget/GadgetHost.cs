@@ -603,12 +603,17 @@ namespace CopilotSessions
 
     public static class GadgetApplication
     {
+        [System.Runtime.InteropServices.DllImport("shell32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+        private static extern int SetCurrentProcessExplicitAppUserModelID(string appId);
+
         public static int Run(string[] args)
         {
             return Run(args, null, null, null);
         }
         public static int Run(string[] args, IGadgetEnvironment environment, string settingsPath, Action<SessionWindow> loaded)
         {
+            int identityResult = SetCurrentProcessExplicitAppUserModelID(NativeSessionNotifier.AppId);
+            if (identityResult < 0) System.Runtime.InteropServices.Marshal.ThrowExceptionForHR(identityResult);
             bool stdin = false;
             string python = null;
             string argumentError = null;

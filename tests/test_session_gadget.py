@@ -532,6 +532,32 @@ class CompatibilityLauncherTests(unittest.TestCase):
 
 @unittest.skipUnless(os.name == "nt", "Native Windows gadget host and WPF")
 class WindowTests(unittest.TestCase):
+    def test_notification_helper_registers_shortcut_identity(self):
+        with temporary_directory() as directory:
+            shortcut = Path(directory) / "Copilot Sessions Identity Test.lnk"
+            helper = ROOT / "windows-helper" / "bin" / "copilot-notify.exe"
+            app_id = "CopilotAgentNotify.CopilotSessions.Tests"
+            result = subprocess.run([
+                str(helper), "--install-shortcut", str(shortcut), str(helper),
+                "--identity-test", str(directory), str(helper), app_id, "Identity test",
+            ], capture_output=True, text=True, timeout=15)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertTrue(shortcut.is_file())
+            powershell = (Path(os.environ["WINDIR"]) / "System32" / "WindowsPowerShell" /
+                          "v1.0" / "powershell.exe")
+            script = (
+                "$shell = New-Object -ComObject Shell.Application; "
+                "$folder = $shell.Namespace($env:SHORTCUT_DIRECTORY); "
+                "$item = $folder.ParseName($env:SHORTCUT_NAME); "
+                "$item.ExtendedProperty('System.AppUserModel.ID')")
+            environment = dict(os.environ, SHORTCUT_DIRECTORY=str(shortcut.parent),
+                               SHORTCUT_NAME=shortcut.name)
+            result = subprocess.run([str(powershell), "-NoProfile", "-NonInteractive",
+                                     "-Command", script], capture_output=True, text=True,
+                                    env=environment, timeout=15)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(result.stdout.strip(), app_id)
+
     def test_installer_python_probe_roundtrips_through_windows_powershell(self):
         lines = (ROOT / "windows-helper" / "install-gadget.ps1").read_text(encoding="utf-8").splitlines()
         assignment = next(line for line in lines if line.startswith("$probe = "))

@@ -38,13 +38,21 @@ foreach ($name in $files) {
 Copy-Item -LiteralPath (Join-Path (Split-Path $PSScriptRoot) "scripts\session_gadget.py") `
     -Destination (Join-Path $destination "session_gadget.py")
 
-$desktop = [Environment]::GetFolderPath("Desktop")
-$shell = New-Object -ComObject WScript.Shell
-$shortcut = $shell.CreateShortcut((Join-Path $desktop "Copilot Sessions.lnk"))
-$shortcut.TargetPath = Join-Path $destination "CopilotSessions.exe"
-$shortcut.Arguments = '--python "' + $python + '"'
-$shortcut.WorkingDirectory = $destination
-$shortcut.IconLocation = $shortcut.TargetPath + ",0"
-$shortcut.Description = "Live Copilot sessions from Windows and WSL"
-$shortcut.Save()
+$target = Join-Path $destination "CopilotSessions.exe"
+$notifier = Join-Path $destination "copilot-notify.exe"
+$arguments = '--python "' + $python + '"'
+$description = "Live Copilot sessions from Windows and WSL"
+$appId = "CopilotAgentNotify.CopilotSessions"
+$programs = [Environment]::GetFolderPath("Programs")
+$shortcuts = @(
+    (Join-Path ([Environment]::GetFolderPath("Desktop")) "Copilot Sessions.lnk"),
+    (Join-Path $programs "Copilot Sessions.lnk")
+)
+foreach ($shortcut in $shortcuts) {
+    & $notifier --install-shortcut $shortcut $target $arguments $destination `
+        $target $appId $description
+    if ($LASTEXITCODE -ne 0) {
+        throw "Cannot register the Copilot Sessions shortcut and notification identity."
+    }
+}
 Write-Host "Installed Copilot Sessions on your desktop. Double-click it to open the gadget."
