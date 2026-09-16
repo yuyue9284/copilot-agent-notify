@@ -130,6 +130,14 @@ retroactive notifications. Repeated snapshots and temporary collector failures
 do not duplicate an alert. This preference is saved as `"notifications":true`
 or `false` in `gadget-ui.json`.
 
+When the last background agent finishes and the main agent is idle, the gadget
+keeps **In progress** for a 10-second grace period before showing **Done** and
+sending its completion notification. New activity cancels the pending completion,
+allowing the main agent to process background results without a premature alert
+or status flicker. Main-agent completion and input requests remain immediate;
+collector polling is unchanged. This is a timing heuristic, not a guarantee that
+work cannot resume later. Initial or replayed history does not start a grace period.
+
 The menu supports keyboard navigation: Tab cycles through appearance, desktop
 notifications, enabled opacity, font-family, and font-size controls; arrow keys
 adjust sliders and font selection; Escape closes the menu. Changes apply live and save with the compact-layout choice in

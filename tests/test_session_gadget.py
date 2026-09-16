@@ -257,6 +257,124 @@ class ScannerTests(unittest.TestCase):
         self.session(events=[{"type": "assistant.turn_start", "agentId": "child", "data": {}}])
         self.assertEqual(self.status(), "In progress")
 
+    def child_event(self, kind, child="child", **data):
+        return dict(event(kind, **data), agentId=child)
+
+    def test_background_completion_holds_status_until_exact_deadline(self):
+        directory = self.session(events=[self.child_event("assistant.turn_start")])
+        with patch.object(probe.time, "monotonic", return_value=100) as clock:
+            self.assertEqual(self.status(), "In progress")
+            self.write(directory, [self.child_event("assistant.message", turnId="1",
+                                                    phase="final_answer"),
+                                   self.child_event("assistant.turn_end", turnId="1")], "a")
+            self.assertEqual(self.status(), "In progress")
+            revision = self.scanner.snapshot()["sessions"][0]["activity_revision"]
+            clock.return_value = 109.999
+            self.write(directory, [self.child_event("subagent.completed"),
+                                   event("session.info")], "a")
+            self.assertEqual(self.status(), "In progress")
+            clock.return_value = 110
+            self.assertEqual(self.status(), "Done")
+            self.assertEqual(self.scanner.snapshot()["sessions"][0]["activity_revision"], revision)
+            clock.return_value = 120
+            self.assertEqual(self.status(), "Done")
+
+    def test_parent_resume_cancels_grace_and_root_completion_is_immediate(self):
+        directory = self.session(events=[self.child_event("assistant.turn_start")])
+        with patch.object(probe.time, "monotonic", return_value=100) as clock:
+            self.assertEqual(self.status(), "In progress")
+            self.write(directory, [self.child_event("subagent.completed")], "a")
+            self.assertEqual(self.status(), "In progress")
+            clock.return_value = 105
+            self.write(directory, [event("assistant.turn_start", turnId="parent")], "a")
+            self.assertEqual(self.status(), "In progress")
+            self.write(directory, [event("assistant.message", turnId="parent", phase="final_answer"),
+                                   event("assistant.turn_end", turnId="parent")], "a")
+            self.assertEqual(self.status(), "Done")
+
+    def test_background_grace_does_not_hide_input_or_new_user_work(self):
+        directory = self.session(events=[self.child_event("assistant.turn_start")])
+        with patch.object(probe.time, "monotonic", return_value=100) as clock:
+            self.assertEqual(self.status(), "In progress")
+            self.write(directory, [self.child_event("subagent.completed"),
+                                   event("hook.start", hookType="notification", input={
+                                       "notification_type": "permission_prompt",
+                                       "sessionId": "root"})], "a")
+            self.assertEqual(self.status(), "Needs input")
+            self.write(directory, [event("user.message", delivery="idle", source="user")], "a")
+            clock.return_value = 120
+            self.assertEqual(self.status(), "In progress")
+
+    def test_queued_child_resume_starts_a_fresh_completion_grace(self):
+        directory = self.session(events=[self.child_event("assistant.turn_start")])
+        with patch.object(probe.time, "monotonic", return_value=100) as clock:
+            self.assertEqual(self.status(), "In progress")
+            self.write(directory, [self.child_event("subagent.completed")], "a")
+            self.assertEqual(self.status(), "In progress")
+            clock.return_value = 105
+            self.write(directory, [self.child_event("assistant.turn_start")], "a")
+            self.assertEqual(self.status(), "In progress")
+            clock.return_value = 111
+            self.write(directory, [self.child_event("subagent.failed")], "a")
+            self.assertEqual(self.status(), "In progress")
+            clock.return_value = 120.999
+            self.assertEqual(self.status(), "In progress")
+            clock.return_value = 121
+            self.assertEqual(self.status(), "Done")
+
+    def test_only_last_child_completion_starts_grace_including_stop_hooks(self):
+        directory = self.session(events=[self.child_event("assistant.turn_start"),
+                                         self.child_event("assistant.turn_start", child="other")])
+        with patch.object(probe.time, "monotonic", return_value=100) as clock:
+            self.assertEqual(self.status(), "In progress")
+            self.write(directory, [self.child_event("subagent.completed")], "a")
+            self.assertEqual(self.status(), "In progress")
+            clock.return_value = 120
+            self.write(directory, [self.child_event("assistant.message", child="other"),
+                                   event("hook.start", hookType="agentStop", hookInvocationId="stop",
+                                         input={"sessionId": "other"}),
+                                   event("hook.end", hookInvocationId="stop", success=True)], "a")
+            self.assertEqual(self.status(), "In progress")
+            clock.return_value = 129.999
+            self.assertEqual(self.status(), "In progress")
+            clock.return_value = 130
+            self.assertEqual(self.status(), "Done")
+
+    def test_historical_child_completion_and_rewrite_do_not_start_grace(self):
+        history = [event("session.start", sessionId="root"),
+                   self.child_event("assistant.turn_start"), self.child_event("subagent.completed")]
+        directory = self.session(events=history[1:])
+        self.assertEqual(self.status(), "Done")
+        self.write(directory, [self.child_event("assistant.turn_start")], "a")
+        self.assertEqual(self.status(), "In progress")
+        self.write(directory, [self.child_event("subagent.completed")], "a")
+        self.assertEqual(self.status(), "In progress")
+        self.assertEqual(probe.Scanner(self.home).snapshot()["sessions"][0]["status"], "Done")
+        self.write(directory, history)
+        self.assertEqual(self.status(), "Done")
+
+    def test_child_finishing_while_root_busy_does_not_delay_root_completion(self):
+        directory = self.session(events=[event("assistant.turn_start", turnId="parent"),
+                                         self.child_event("assistant.turn_start")])
+        with patch.object(probe.time, "monotonic", return_value=100):
+            self.assertEqual(self.status(), "In progress")
+            self.write(directory, [self.child_event("subagent.completed"),
+                                   event("assistant.message", turnId="parent", phase="final_answer"),
+                                   event("assistant.turn_end", turnId="parent")], "a")
+            self.assertEqual(self.status(), "Done")
+
+    def test_abort_and_shutdown_clear_pending_background_completion(self):
+        directory = self.session(events=[self.child_event("assistant.turn_start")])
+        with patch.object(probe.time, "monotonic", return_value=100):
+            self.assertEqual(self.status(), "In progress")
+            self.write(directory, [self.child_event("subagent.completed"), event("abort")], "a")
+            self.assertEqual(self.status(), "Done")
+            self.write(directory, [self.child_event("assistant.turn_start")], "a")
+            self.assertEqual(self.status(), "In progress")
+            self.write(directory, [self.child_event("subagent.completed"),
+                                   event("session.shutdown")], "a")
+            self.assertEqual(self.scanner.snapshot()["sessions"], [])
+
     def test_transcript_replacement_resets_reader(self):
         directory = self.session(events=[event("assistant.turn_start")])
         self.assertEqual(self.status(), "In progress")

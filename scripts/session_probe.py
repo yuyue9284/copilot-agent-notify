@@ -15,16 +15,34 @@ import time
 from activity import Activity, Transcript, atomic_json, process_token, read_json, state_directory
 
 
+BACKGROUND_COMPLETION_GRACE_SECONDS = 10
+
+
 class ActivityRevision(Activity):
     """Stable activity identity across polling and transcript replay."""
 
     def reset(self):
         super().reset()
         self.activity_revision = ""
+        self.live = False
+        self.completion_deadline = None
+
+    def counts(self):
+        busy, attention = super().counts()
+        if (not busy and not attention and self.completion_deadline is not None
+                and time.monotonic() < self.completion_deadline):
+            return (1, 0)
+        return (busy, attention)
 
     def event(self, event):
         previous = self.activity_revision
+        had_children = bool(self.children)
         super().event(event)
+        if any(super().counts()):
+            self.completion_deadline = None
+        elif self.live and had_children and not self.children:
+            # A child's completion can wake its parent a few seconds later.
+            self.completion_deadline = time.monotonic() + BACKGROUND_COMPLETION_GRACE_SECONDS
         self.activity_revision = previous
         kind = event.get("type")
         data = event.get("data") or {}
@@ -228,6 +246,8 @@ class Scanner:
                     busy, attention = transcript.display_counts
                     row["status"] = "Needs input" if attention else "In progress" if busy else "Done"
                     row["activity_revision"] = transcript.state.activity_revision
+                    # Initial/replaced history is a baseline, not a live completion.
+                    transcript.state.live = True
             except (OSError, ValueError, TypeError, AttributeError) as error:
                 row["status"] = "Unknown"
                 errors.append("%s: %s" % (session_id, error))
