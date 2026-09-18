@@ -17,9 +17,15 @@ function fixture() {
     let listener;
     let clock = 1000;
     let list = async () => ({ tasks });
+    let history = [];
+    let read = async () => ({ events: history, cursor: "synthetic-cursor", cursorStatus: "ok", hasMore: false });
+    const reads = [];
     let unsubscribed = false;
     const bridge = createBridge({
-        rpc: { tasks: { list: () => list() } },
+        rpc: { tasks: { list: () => list() }, eventLog: { read: params => {
+            reads.push(params);
+            return read(params);
+        } } },
         on: callback => {
             listener = callback;
             return () => { unsubscribed = true; };
@@ -31,10 +37,12 @@ function fixture() {
         report: value => errors.push(value),
     });
     return {
-        bridge, output, errors,
+        bridge, output, errors, reads,
         set tasks(value) { tasks = value; },
         set clock(value) { clock = value; },
         set list(value) { list = value; },
+        set history(value) { history = value; },
+        set read(value) { read = value; },
         event: value => listener(value),
         get last() { return output.at(-1); },
         get unsubscribed() { return unsubscribed; },
@@ -63,7 +71,87 @@ test("query snapshots contain only allowlisted metadata and no command text", as
     assert.ok(!JSON.stringify(f.output).includes("PRIVATE"));
 });
 
-test("latest activity follows root intent, is bounded, and clears on a new turn", async () => {
+test("SDK history restores and reconciles activity without any push notifications", async () => {
+    const f = fixture();
+    try {
+        f.history = [{ type: "tool.execution_start", timestamp: "1970-01-01T00:01:40Z",
+            data: { toolName: "bash", arguments: {
+                description: "Checking synthetic fixtures", command: "PRIVATE COMMAND",
+            } } }];
+        await f.bridge.refresh();
+        assert.equal(f.last.latest_activity, "Checking synthetic fixtures");
+        assert.deepEqual(f.reads[0], {
+            direction: "backward", max: 1,
+            types: ["assistant.intent", "tool.execution_progress", "tool.execution_start"],
+            agentScope: "primary", includeEphemeral: false,
+        });
+        f.history = [{ type: "tool.execution_start", timestamp: "1970-01-01T00:01:41Z",
+            data: { toolName: "view", arguments: { path: "/synthetic/private/path" } } }];
+        await f.bridge.refresh();
+        assert.equal(f.last.latest_activity, "Using view");
+        f.event({ type: "assistant.turn_start" });
+        await f.bridge.refresh();
+        assert.equal(f.last.latest_activity, "Using view");
+        assert.ok(!JSON.stringify(f.output).includes("PRIVATE COMMAND"));
+        assert.ok(!JSON.stringify(f.output).includes("/synthetic/private/path"));
+    } finally { await f.bridge.stop(); }
+});
+
+test("older history and child events cannot replace newer live activity", async () => {
+    const f = fixture();
+    try {
+        f.event({ type: "tool.execution_progress", timestamp: "1970-01-01T00:01:42Z",
+            data: { progressMessage: "Completed synthetic checks" } });
+        f.history = [{ type: "tool.execution_start", timestamp: "1970-01-01T00:01:40Z",
+            data: { toolName: "view" } }];
+        await f.bridge.refresh();
+        assert.equal(f.last.latest_activity, "Completed synthetic checks");
+        f.history = [{ type: "assistant.intent", agentId: "synthetic-child",
+            timestamp: "1970-01-01T00:01:43Z", data: { intent: "Child work" } }];
+        await f.bridge.refresh();
+        assert.equal(f.last.latest_activity, "Completed synthetic checks");
+    } finally { await f.bridge.stop(); }
+});
+
+test("activity history failures are redacted, hide text, and recover", async () => {
+    const f = fixture();
+    try {
+        f.event({ type: "assistant.intent", data: { intent: "Checking fixtures" } });
+        f.read = async () => { throw new Error("PRIVATE SERVER ERROR"); };
+        await f.bridge.refresh();
+        await f.bridge.refresh();
+        assert.equal(f.last.state, "activity_query_failed");
+        assert.equal(f.last.latest_activity, "");
+        assert.equal(f.errors.length, 1);
+        assert.ok(!JSON.stringify([f.output, f.errors]).includes("PRIVATE"));
+        f.read = async () => ({ events: [], cursor: "", cursorStatus: "ok", hasMore: false });
+        await f.bridge.refresh();
+        assert.equal(f.last.state, "ready");
+        assert.equal(f.last.latest_activity, "Checking fixtures");
+        for (const result of [null, {}, { events: [], cursor: "", cursorStatus: "expired", hasMore: false },
+            { events: [{ type: "assistant.intent", data: { intent: "Untimed" } }],
+                cursor: "", cursorStatus: "ok", hasMore: false }]) {
+            f.read = async () => result;
+            await f.bridge.refresh();
+            assert.equal(f.last.state, "activity_query_failed");
+        }
+    } finally { await f.bridge.stop(); }
+});
+
+test("shutdown ignores a late activity read without waiting for it", async () => {
+    const f = fixture();
+    let finish;
+    f.read = () => new Promise(resolve => { finish = resolve; });
+    const running = f.bridge.refresh();
+    await Promise.resolve();
+    assert.equal(typeof finish, "function");
+    await f.bridge.stop();
+    finish({ events: [], cursor: "", cursorStatus: "ok", hasMore: false });
+    await running;
+    assert.equal(f.last.state, "stopped");
+});
+
+test("latest activity follows root intent, is bounded, and survives assistant turns", async () => {
     const f = fixture();
     try {
         f.event({ type: "assistant.intent", data: { intent: "  Checking\nsynthetic tests\u202e  " } });
@@ -87,7 +175,7 @@ test("latest activity follows root intent, is bounded, and clears on a new turn"
         f.list = async () => ({ tasks: [] });
         f.event({ type: "assistant.turn_start" });
         await f.bridge.refresh();
-        assert.equal(f.last.latest_activity, "");
+        assert.equal(f.last.latest_activity, "x".repeat(239));
     } finally {
         await f.bridge.stop();
     }
@@ -116,6 +204,11 @@ test("sessions without intents publish tool descriptions and progress, never raw
         } });
         await delay(100);
         assert.equal(f.last.latest_activity, "Checking synthetic fixtures");
+        f.event({ type: "tool.execution_complete" });
+        f.event({ type: "assistant.turn_end" });
+        f.event({ type: "assistant.turn_start" });
+        await delay(100);
+        assert.equal(f.last.latest_activity, "Checking synthetic fixtures");
         f.event({ type: "tool.execution_progress", data: { progressMessage: "Completed 2 of 3 checks" } });
         await f.bridge.refresh();
         assert.equal(f.last.latest_activity, "Completed 2 of 3 checks");
@@ -126,6 +219,10 @@ test("sessions without intents publish tool descriptions and progress, never raw
         f.event({ type: "tool.execution_start", data: {
             toolName: "view", arguments: { path: "/synthetic/private/path" },
         } });
+        await f.bridge.refresh();
+        assert.equal(f.last.latest_activity, "Using view");
+        f.event({ type: "assistant.turn_start" });
+        f.event({ type: "session.idle" });
         await f.bridge.refresh();
         assert.equal(f.last.latest_activity, "Using view");
         assert.ok(!JSON.stringify(f.output).includes("PRIVATE COMMAND"));

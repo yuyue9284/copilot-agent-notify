@@ -29,6 +29,18 @@ An independent community project, not an official GitHub or Microsoft product.
   reported intent or tool activity in a separate column. Hide it with **Appearance > Show latest
   activity**; the choice persists across restarts and layouts.
 
+## Screenshots
+
+The examples below use synthetic sessions, paths, IDs, and activity descriptions.
+
+**Comfortable layout**
+
+![Copilot Sessions showing Windows and WSL sessions with status and latest activity](docs/images/gadget-example.png)
+
+**Compact layout, widened to show activity**
+
+![Compact Copilot Sessions with synthetic session activity](docs/images/gadget-example-compact.png)
+
 ## Quick start: Windows gadget
 
 ### Requirements

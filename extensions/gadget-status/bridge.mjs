@@ -6,6 +6,7 @@ import { performance } from "node:perf_hooks";
 
 const TERMINAL = new Set(["completed", "failed", "cancelled"]);
 const GRACE_MS = 10_000;
+const ACTIVITY_TYPES = ["assistant.intent", "tool.execution_progress", "tool.execution_start"];
 
 export function snapshotPath(sessionId, home = process.env.COPILOT_HOME || join(homedir(), ".copilot")) {
     if (typeof sessionId !== "string" || !/^[a-zA-Z0-9-]+$/.test(sessionId)) {
@@ -66,6 +67,33 @@ export function createBridge(session, {
     let closed = false;
     let lastError = null;
     let latestActivity = "";
+    let latestActivityTime = -Infinity;
+
+    function updateActivity(event, history = false) {
+        if (event.agentId && event.agentId !== sessionId) return;
+        let activity;
+        if (event.type === "assistant.intent") {
+            if (typeof event.data?.intent !== "string") throw new Error("Invalid assistant intent.");
+            activity = event.data.intent;
+        } else if (event.type === "tool.execution_progress") {
+            if (typeof event.data?.progressMessage !== "string") throw new Error("Invalid tool progress.");
+            activity = event.data.progressMessage;
+        } else if (event.type === "tool.execution_start") {
+            const description = event.data?.arguments?.description;
+            if (typeof description === "string" && description.trim()) activity = description;
+            else if (typeof event.data?.toolName === "string") activity = `Using ${event.data.toolName}`;
+            else throw new Error("Invalid tool start.");
+        }
+        if (activity === undefined) return;
+        const timestamp = typeof event.timestamp === "string" ? Date.parse(event.timestamp) : NaN;
+        if (history && !Number.isFinite(timestamp)) throw new Error("Invalid activity timestamp.");
+        const time = Number.isFinite(timestamp) ? timestamp : now();
+        // A persisted tool start must not overwrite a newer live intent/progress event.
+        if (time < latestActivityTime) return;
+        latestActivityTime = time;
+        latestActivity = activity.replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, " ")
+            .replace(/\s+/g, " ").trim().slice(0, 240).replace(/[\ud800-\udbff]$/, "");
+    }
 
     async function emit(state, count = 0, settling = false) {
         writing = publish({
@@ -89,18 +117,37 @@ export function createBridge(session, {
         inFlight = (async () => {
             const generation = rootGeneration;
             let count;
+            let failureState = "task_query_failed";
             try {
                 let observed;
                 do {
                     observed = revision;
+                    failureState = "task_query_failed";
                     count = pendingShells(await session.rpc.tasks.list());
+                    if (closed) return;
+                    failureState = "activity_query_failed";
+                    const history = await session.rpc.eventLog.read({
+                        direction: "backward", max: 1, types: ACTIVITY_TYPES,
+                        agentScope: "primary", includeEphemeral: false,
+                    });
+                    if (!history || !Array.isArray(history.events) || history.events.length > 1
+                            || history.cursorStatus !== "ok" || typeof history.cursor !== "string"
+                            || typeof history.hasMore !== "boolean"
+                            || history.events.some(event => !event || !ACTIVITY_TYPES.includes(event.type))) {
+                        throw new Error("Invalid SDK activity history.");
+                    }
+                    if (!closed && observed === revision && history.events.length) {
+                        updateActivity(history.events[0], true);
+                    }
                 } while (!closed && observed !== revision);
             } catch {
                 if (!closed) {
-                    if (lastError !== "task_query_failed") {
-                        report("Gadget SDK bridge: task query failed or returned an unsupported schema.");
+                    if (lastError !== failureState) {
+                        report(failureState === "activity_query_failed"
+                            ? "Gadget SDK bridge: activity query failed or returned an unsupported schema."
+                            : "Gadget SDK bridge: task query failed or returned an unsupported schema.");
                     }
-                    lastError = "task_query_failed";
+                    lastError = failureState;
                     await emit(lastError);
                 }
                 return;
@@ -118,34 +165,12 @@ export function createBridge(session, {
     }
 
     const unsubscribe = session.on(event => {
-        const root = !event.agentId || event.agentId === sessionId;
-        let activity;
-        if (root && event.type === "assistant.intent") {
-            if (typeof event.data?.intent !== "string") {
-                report("Gadget SDK bridge: invalid assistant intent.");
-                return;
-            }
-            activity = event.data.intent;
-        } else if (root && event.type === "tool.execution_progress") {
-            if (typeof event.data?.progressMessage !== "string") {
-                report("Gadget SDK bridge: invalid tool progress.");
-                return;
-            }
-            activity = event.data.progressMessage;
-        } else if (root && event.type === "tool.execution_start") {
-            const description = event.data?.arguments?.description;
-            if (typeof description === "string" && description.trim()) {
-                activity = description;
-            } else if (typeof event.data?.toolName === "string") {
-                activity = `Using ${event.data.toolName}`;
-            }
-        }
-        if (activity !== undefined) {
-            latestActivity = activity.replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, " ")
-                .replace(/\s+/g, " ").trim().slice(0, 240).replace(/[\ud800-\udbff]$/, "");
+        try { updateActivity(event); }
+        catch {
+            report("Gadget SDK bridge: invalid activity event.");
+            return;
         }
         if (event.type === "assistant.turn_start" && (!event.agentId || event.agentId === sessionId)) {
-            latestActivity = "";
             rootGeneration++;
             rootActive = true;
             settleUntil = 0;

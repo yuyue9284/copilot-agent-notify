@@ -38,13 +38,20 @@ so cloning this repository does not auto-load it.
 
 The extension registers no tools or permission hooks, sends no prompts, and
 requests no sensitive environment variables. It joins its host's foreground
-session and makes task-list queries. It does not start, cancel, promote, or
+session and makes task-list and bounded event-history queries. It does not start, cancel, promote, or
 remove tasks. This is an observation-only implementation, not a claim that the
 SDK connection is restricted to read-only operations by a permission boundary.
 
 Task-change, tool-completion, notification, and root-activity events request a
 refresh. Events within 50 milliseconds are coalesced; a five-second timer provides
-reconciliation and freshness heartbeats. Only one query is in flight at a time.
+reconciliation and freshness heartbeats. Each refresh also reads the newest
+persisted main-agent activity through SDK `session.rpc.eventLog.read`
+(`direction: backward`, `max: 1`, activity-type filter, `agentScope: primary`).
+This restores activity after reload and updates it even when a host does not
+deliver live event callbacks. Windows and WSL use the same path, including CLI
+sessions launched from VS Code terminals. Newer live intent/progress events take
+precedence over older persisted events by event timestamp.
+Only one refresh is in flight at a time, with sequential SDK queries.
 If events arrive during a query, its result is discarded and queried again before
 publication. Hung queries stop publishing fresh status rather than accumulating
 requests. There is no direct shell process inspection.
@@ -87,11 +94,15 @@ main-agent activity: `assistant.intent`, `tool.execution_progress` messages, or
 the short `arguments.description` from a tool-start event. Tool starts without
 a description show `Using <tool name>`, never raw commands or file arguments.
 The latest of these events wins. Text is normalized to one line and limited to
-240 UTF-16 code units by the bridge. Child activity is ignored. It is cleared on a
-new main-agent turn, retained after completion as the **latest** activity (not a
-claim of ongoing work), and omitted from display while bridge health is unknown.
-It is blank until an activity event arrives; past activity is not replayed on bridge
-startup. Older bridge snapshots without this field remain supported.
+240 UTF-16 code units by the bridge. Child activity is ignored. Text is retained
+across assistant turns (including thinking between tool calls) and after completion
+as the **latest** activity, not a claim of ongoing work. A new activity event replaces
+it; it is omitted from display while bridge health is unknown.
+On startup the bridge restores the latest matching persisted activity, if any.
+It remains blank when the session has no matching activity. Ephemeral descriptions
+are not guaranteed to survive a reload. Older bridge snapshots without this field
+remain supported. An unsupported or failed event-history query surfaces
+`activity_query_failed`, not a healthy blank value.
 
 The gadget's **Latest activity** column is visible by default and can be hidden
 with **Appearance > Show latest activity**. This preference persists in
