@@ -433,6 +433,14 @@ leaves that tab working until B finishes. Separate tabs are aggregated
 independently, including inactive tabs. Idle names have no checkmark or other
 permanent decoration.
 
+The gadget and terminal coordinator share automatic status selection. When an
+optional SDK bridge is present, its pending shell tasks also keep indicators
+working. Unhealthy bridge data shows the attention marker and a local
+coordinator error; recovery to idle does not ring the all-finished bell.
+See [SDK backend selection](sdk-bridge.md#backend-selection) for the `legacy`
+troubleshooting override and prototype limitations. Hook-based desktop
+notifications remain independent.
+
 ### Outer Windows Terminal indicator
 
 When running under Windows Terminal (`WT_SESSION` is present), the coordinator

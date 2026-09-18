@@ -12,7 +12,7 @@ import sys
 import threading
 import time
 
-from activity import Activity, Transcript, atomic_json, process_token, read_json, state_directory
+from activity import Activity, StatusProvider, Transcript, atomic_json, process_token, read_json, state_directory
 
 
 BACKGROUND_COMPLETION_GRACE_SECONDS = 10
@@ -106,6 +106,7 @@ def workspace_name(path):
 class Scanner:
     def __init__(self, home=None):
         self.home = Path(home or os.environ.get("COPILOT_HOME") or Path.home() / ".copilot")
+        self.status_provider = StatusProvider(self.home)
         self.readers = {}
         self.cache_root = state_directory("").parent.parent
         scope = hashlib.sha256(str(self.home.resolve()).encode("utf-8")).hexdigest()[:24]
@@ -153,6 +154,7 @@ class Scanner:
             return self.identities
 
     def snapshot(self):
+        self.status_provider.refresh()
         sessions = []
         errors = []
         owners = {}
@@ -213,11 +215,13 @@ class Scanner:
                 errors.append("Cannot save process identities: " + str(error))
         self.identities = retained
         keep = set()
+        status_owners = set()
         for directory, candidates in sorted(owners.items()):
             session_id = directory.name
             owner = min(candidates)
             key = (session_id, owner)
             keep.add(key)
+            status_owners.add((str(directory), session_id, owner[0]))
             row = {"id": session_id, "pid": owner[0], "title": session_id[:8],
                    "cwd": "", "status": "Loading", "activity_revision": None}
             try:
@@ -243,8 +247,13 @@ class Scanner:
                 elif ready:
                     if transcript.state.shutdown:
                         continue
-                    busy, attention = transcript.display_counts
-                    row["status"] = "Needs input" if attention else "In progress" if busy else "Done"
+                    try:
+                        busy, attention = self.status_provider.counts(
+                            directory, session_id, owner[0], transcript.display_counts)
+                        row["status"] = "Needs input" if attention else "In progress" if busy else "Done"
+                    except ValueError as error:
+                        row["status"] = "Unknown"
+                        errors.append("%s: %s" % (session_id, error))
                     row["activity_revision"] = transcript.state.activity_revision
                     # Initial/replaced history is a baseline, not a live completion.
                     transcript.state.live = True
@@ -254,6 +263,7 @@ class Scanner:
                 self.readers.pop(key, None)
             sessions.append(row)
         self.readers = {key: reader for key, reader in self.readers.items() if key in keep}
+        self.status_provider.retain(status_owners)
         return {"sessions": sessions, "errors": errors}
 
 

@@ -26,7 +26,7 @@ POLL_SECONDS = 1
 def read_json(path, default=None):
     for attempt in range(20):
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
+            return json.loads(path.read_text(encoding="utf-8-sig"))
         except FileNotFoundError:
             return default
         except PermissionError:
@@ -52,6 +52,67 @@ def atomic_json(path, value):
                 time.sleep(0.025)
     finally:
         scratch.unlink(missing_ok=True)
+
+
+class StatusProvider:
+    """Shared transcript baseline with an optional, fail-closed SDK overlay."""
+
+    def __init__(self, home=None):
+        self.home = Path(home or os.environ.get("COPILOT_HOME") or Path.home() / ".copilot")
+        self.backend = "auto"
+        self.configuration_error = None
+        self.sdk_sessions = set()
+
+    def refresh(self):
+        try:
+            backend = os.environ.get("COPILOT_NOTIFY_STATUS_BACKEND")
+            if not backend:
+                config = read_json(self.home / "copilot-agent-notify.json", {})
+                if not isinstance(config, dict):
+                    raise ValueError("expected a configuration object")
+                backend = config.get("status_backend", "auto")
+            if backend not in ("auto", "legacy"):
+                raise ValueError("status_backend must be auto or legacy")
+            self.backend = backend
+            self.configuration_error = None
+        except (OSError, ValueError) as error:
+            self.configuration_error = "Status backend: " + str(error)
+
+    def counts(self, directory, session_id, pid, baseline):
+        if self.configuration_error:
+            raise ValueError(self.configuration_error)
+        if self.backend == "legacy":
+            return baseline
+        key = (str(directory), session_id, pid)
+        missing = object()
+        try:
+            value = read_json(directory / "gadget-sdk.json", missing)
+        except (OSError, ValueError) as error:
+            self.sdk_sessions.add(key)
+            raise ValueError("SDK bridge: cannot read status") from error
+        if value is missing:
+            if key in self.sdk_sessions:
+                raise ValueError("SDK bridge: status disappeared; check the extension")
+            return baseline
+        self.sdk_sessions.add(key)
+        if (not isinstance(value, dict) or type(value.get("protocol_version")) is not int
+                or value["protocol_version"] != 1 or value.get("session_id") != session_id
+                or type(value.get("owner_pid")) is not int or value["owner_pid"] != pid
+                or type(value.get("pending_shells")) is not int or value["pending_shells"] < 0
+                or type(value.get("settling")) is not bool
+                or type(value.get("updated_at")) not in (int, float)
+                or not 0 <= value["updated_at"] <= 1e12):
+            raise ValueError("SDK bridge: invalid snapshot or owner mismatch")
+        age = time.time() - value["updated_at"]
+        if age < -5 or age > 15:
+            raise ValueError("SDK bridge: stale status; check the extension")
+        if value.get("state") != "ready":
+            raise ValueError("SDK bridge: unavailable; check the extension")
+        busy, attention = baseline
+        return (int(bool(busy or value["pending_shells"] or value["settling"])), attention)
+
+    def retain(self, owners):
+        self.sdk_sessions.intersection_update(owners)
 
 
 class Lock:
@@ -594,6 +655,8 @@ def run_worker(directory, session, binary):
     readers = {}
     identities = {}
     last_error = None
+    provider = StatusProvider()
+    previous_status_error = False
     with Lock(directory / "registry.lock"):
         if not writer.acquire():
             return 0
@@ -628,8 +691,11 @@ def run_worker(directory, session, binary):
                         LOG.info("coordinator stopped: no live registrations")
                         return 1 if cleanup_error or outer_error else 0
                 panes, tabs = zellij.snapshot()
+                provider.refresh()
                 ready = {}
                 obsolete = {}
+                status_errors = []
+                status_owners = set()
                 for key, record in records.items():
                     identity = (record["pid"], record["token"], record["transcript"])
                     if identities.get(key) != identity:
@@ -654,9 +720,25 @@ def run_worker(directory, session, binary):
                         if reader.state.shutdown and reader.new_shutdown:
                             obsolete[key] = record
                         else:
+                            status_directory = Path(record["transcript"]).parent
+                            status_owners.add((str(status_directory), record["session_id"], record["pid"]))
+                            try:
+                                reader.display_counts = provider.counts(
+                                    status_directory, record["session_id"], record["pid"],
+                                    reader.display_counts)
+                                reader.status_error = None
+                            except ValueError as error:
+                                reader.status_error = "%s: %s" % (record["session_id"], error)
+                                status_errors.append(reader.status_error)
+                                reader.display_counts = (reader.display_counts[0], 1)
                             ready[key] = record
                     elif reader.validated:
                         ready[key] = record
+                        if getattr(reader, "status_error", None):
+                            status_errors.append(reader.status_error)
+                        status_owners.add((str(Path(record["transcript"]).parent),
+                                           record["session_id"], record["pid"]))
+                provider.retain(status_owners)
                 if obsolete:
                     with Lock(directory / "registry.lock"):
                         latest = read_json(directory / "registrations.json", {})
@@ -667,16 +749,22 @@ def run_worker(directory, session, binary):
                 titles.update(panes, tabs, aggregate(ready, readers, panes))
                 outer_counts = tuple(sum(readers[key].display_counts[index] for key in ready)
                                      for index in (0, 1))
-                outer_error = outer.update(outer_counts)
+                outer_error = outer.update(
+                    outer_counts, notify_completion=not status_errors and not previous_status_error)
+                # Keep recovery quiet if clearing a terminal failed and must be retried.
+                previous_status_error = bool(status_errors) or (previous_status_error and bool(outer_error))
                 for key in set(readers) - set(records):
                     del readers[key]
                     del identities[key]
+                status_error = "; ".join(status_errors) or None
+                if status_error and status_error != last_error:
+                    LOG.error("status: %s", status_error)
                 atomic_json(directory / "status.json", {
                     "pid": os.getpid(), "token": process_token(os.getpid()),
                     "heartbeat": time.time(), "running": True,
-                    "registrations": len(records) - len(obsolete), "error": None,
-                    "outer_error": outer_error})
-                last_error = None
+                    "registrations": len(records) - len(obsolete), "error": status_error,
+                    "outer_error": outer_error, "status_backend": provider.backend})
+                last_error = status_error
             except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
                 message = str(error)
                 if message != last_error:

@@ -73,6 +73,17 @@ class OuterProgressTests(Files):
         self.outer.update((0, 0))
         self.outer.write.assert_called_with(self.target, 0, completed=True)
 
+    def test_recovery_from_unknown_clears_without_completion_bell(self):
+        self.outer.update((1, 0))
+        self.outer.update((0, 1), notify_completion=False)
+        self.outer.write.reset_mock()
+        self.outer.update((0, 0), notify_completion=False)
+        self.outer.write.assert_called_once_with(self.target, 0)
+        self.outer.write.reset_mock()
+        self.outer.update((1, 0))
+        self.outer.update((0, 0))
+        self.outer.write.assert_called_with(self.target, 0, completed=True)
+
     def test_completion_sequence_clears_progress_then_rings_bell(self):
         self.assertEqual(progress_sequence(0, completed=True), "\x1b]9;4;0;0\x07\x07")
         with self.assertRaises(ValueError):

@@ -57,6 +57,98 @@ class Files(unittest.TestCase):
                 stream.write(json.dumps(item) + "\n")
 
 
+class StatusProviderTests(Files):
+    def setUp(self):
+        super().setUp()
+        self.home = self.directory / "home"
+        self.session = self.home / "session-state" / "synthetic"
+        self.session.mkdir(parents=True)
+        self.env = patch.dict(os.environ, COPILOT_NOTIFY_STATUS_BACKEND="")
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        self.provider = activity.StatusProvider(self.home)
+        self.provider.refresh()
+
+    def snapshot(self, **changes):
+        value = dict(protocol_version=1, session_id="synthetic", owner_pid=42,
+                     updated_at=time.time(), state="ready", pending_shells=1, settling=False)
+        value.update(changes)
+        activity.atomic_json(self.session / "gadget-sdk.json", value)
+
+    def counts(self, baseline=(0, 0)):
+        return self.provider.counts(self.session, "synthetic", 42, baseline)
+
+    def test_auto_uses_legacy_without_bridge_and_merges_sdk_activity(self):
+        self.assertEqual(self.counts(), (0, 0))
+        self.assertEqual(self.counts((1, 1)), (1, 1))
+        self.snapshot()
+        self.assertEqual(self.counts(), (1, 0))
+        self.assertEqual(self.counts((0, 1)), (1, 1))
+        self.snapshot(pending_shells=0, settling=True)
+        self.assertEqual(self.counts(), (1, 0))
+        self.snapshot(pending_shells=0)
+        self.assertEqual(self.counts(), (0, 0))
+        self.assertEqual(self.counts((1, 0)), (1, 0))
+
+    def test_config_legacy_override_and_environment_precedence(self):
+        config = self.home / "copilot-agent-notify.json"
+        activity.atomic_json(config, {"hook_alerts": False, "status_backend": "legacy"})
+        self.snapshot(state="stopped")
+        self.provider.refresh()
+        self.assertEqual(self.counts(), (0, 0))
+        with patch.dict(os.environ, COPILOT_NOTIFY_STATUS_BACKEND="auto"):
+            self.provider.refresh()
+            with self.assertRaisesRegex(ValueError, "SDK bridge"):
+                self.counts()
+        config.write_text("invalid")
+        with patch.dict(os.environ, COPILOT_NOTIFY_STATUS_BACKEND="legacy"):
+            self.provider.refresh()
+            self.assertEqual(self.counts(), (0, 0))
+
+    def test_invalid_configuration_is_reported_and_recovers(self):
+        config = self.home / "copilot-agent-notify.json"
+        for value in (None, [], {"status_backend": "sdk"}, {"status_backend": False}):
+            activity.atomic_json(config, value)
+            self.provider.refresh()
+            with self.assertRaisesRegex(ValueError, "Status backend:"):
+                self.counts()
+        activity.atomic_json(config, {})
+        self.provider.refresh()
+        self.assertEqual(self.counts(), (0, 0))
+
+    def test_windows_utf8_bom_configuration_is_supported(self):
+        config = self.home / "copilot-agent-notify.json"
+        config.write_text('{"hook_alerts":false,"status_backend":"legacy"}', encoding="utf-8-sig")
+        self.snapshot(state="stopped")
+        self.provider.refresh()
+        self.assertEqual(self.counts(), (0, 0))
+        self.assertIsNone(self.provider.configuration_error)
+
+    def test_bridge_loss_does_not_silently_fall_back(self):
+        self.snapshot()
+        self.assertEqual(self.counts(), (1, 0))
+        (self.session / "gadget-sdk.json").unlink()
+        with self.assertRaisesRegex(ValueError, "disappeared"):
+            self.counts()
+        self.assertEqual(self.provider.counts(self.session, "other", 99, (0, 0)), (0, 0))
+        self.provider.retain(set())
+        self.assertEqual(self.counts(), (0, 0))
+
+    def test_freshness_boundary_and_untrusted_values(self):
+        with patch.object(activity.time, "time", return_value=100):
+            self.snapshot(updated_at=85)
+            self.assertEqual(self.counts(), (1, 0))
+            self.snapshot(updated_at=84.999)
+            with self.assertRaisesRegex(ValueError, "stale"):
+                self.counts()
+            for value in (10 ** 400, float("nan"), float("inf"), True):
+                self.snapshot(updated_at=value)
+                with self.assertRaisesRegex(ValueError, "invalid snapshot"):
+                    self.counts()
+        self.snapshot()
+        self.assertEqual(self.counts(), (1, 0))
+
+
 class ReducerTests(unittest.TestCase):
     def setUp(self):
         self.state = activity.Activity("root")
@@ -497,6 +589,39 @@ class RuntimeTests(Files):
         if events is not None:
             self.write_events(path, [start(session), *events])
         return path
+
+    def test_sdk_shell_status_drives_terminal_and_reports_bridge_failure(self):
+        path = self.transcript("a", [])
+        snapshot = dict(protocol_version=1, session_id="a", owner_pid=os.getpid(),
+                        updated_at=time.time(), state="ready", pending_shells=1, settling=False)
+        activity.atomic_json(path.parent / "gadget-sdk.json", snapshot)
+        self.assert_process(self.launch())
+        self.wait_for(lambda s: s["tabs"][0]["name"] == activity.prefix((1, 0)) + "work")
+        snapshot.update(state="task_query_failed", pending_shells=0, updated_at=time.time())
+        activity.atomic_json(path.parent / "gadget-sdk.json", snapshot)
+        self.wait_for(lambda s: s["tabs"][0]["name"] == activity.prefix((0, 1)) + "work"
+                      and activity.read_json(self.cache / "status.json", {}).get("error"))
+        self.assertIn("SDK bridge:", activity.read_json(self.cache / "status.json")["error"])
+        snapshot.update(state="ready", updated_at=time.time())
+        activity.atomic_json(path.parent / "gadget-sdk.json", snapshot)
+        self.wait_for(lambda s: s["tabs"][0]["name"] == "work"
+                      and activity.read_json(self.cache / "status.json", {}).get("error") is None)
+        self.assertIsNone(activity.read_json(self.cache / "status.json")["error"])
+
+    def test_legacy_backend_bypasses_sdk_in_terminal_coordinator(self):
+        path = self.transcript("a", [])
+        activity.atomic_json(path.parent / "gadget-sdk.json", {
+            "state": "stopped",
+        })
+        activity.atomic_json(Path(self.env["COPILOT_HOME"]) / "copilot-agent-notify.json", {
+            "status_backend": "legacy",
+        })
+        self.assert_process(self.launch())
+        self.wait_for(lambda s: s["tabs"][0]["name"] == "work"
+                      and activity.read_json(self.cache / "status.json", {}).get("status_backend") == "legacy")
+        status = activity.read_json(self.cache / "status.json")
+        self.assertEqual(status["status_backend"], "legacy")
+        self.assertIsNone(status["error"])
 
     def launch(self, session="a", pane="1", hook="sessionStart", extra=None):
         payload = {"sessionId": session}

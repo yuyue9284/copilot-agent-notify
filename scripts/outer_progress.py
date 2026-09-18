@@ -214,9 +214,9 @@ class OuterProgress:
         finally:
             os.close(fd)
 
-    def update(self, counts, closing=False):
+    def update(self, counts, closing=False, notify_completion=True):
         try:
-            self._update(counts, closing)
+            self._update(counts, closing, notify_completion)
             self.last_error = None
         except (OSError, ValueError, subprocess.SubprocessError) as error:
             message = str(error)
@@ -225,7 +225,7 @@ class OuterProgress:
             self.last_error = message
         return self.last_error
 
-    def _update(self, counts, closing):
+    def _update(self, counts, closing, notify_completion):
         state = progress_state(counts) if self.enabled and not closing else 0
         if closing or not self.enabled:
             self.targets = {}
@@ -246,7 +246,7 @@ class OuterProgress:
                 self.owned[key] = target
                 self.atomic_json(self.journal, self.owned)
             if state or key in self.owned:
-                completed = state == 0 and self.applied.get(key) in (3, 4)
+                completed = notify_completion and state == 0 and self.applied.get(key) in (3, 4)
                 if completed:
                     self.write(target, state, completed=True)
                 else:

@@ -58,6 +58,85 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(snapshot["errors"], [])
         return snapshot["sessions"][0]["status"]
 
+    def sdk_snapshot(self, directory, **overrides):
+        value = dict(protocol_version=1, session_id=directory.name, owner_pid=42,
+                     updated_at=time.time(), state="ready", pending_shells=0, settling=False)
+        value.update(overrides)
+        (directory / "gadget-sdk.json").write_text(json.dumps(value))
+
+    def test_sdk_pending_shell_overrides_idle_transcript_and_settles(self):
+        directory = self.session()
+        self.sdk_snapshot(directory, pending_shells=1)
+        self.assertEqual(self.status(), "In progress")
+        self.sdk_snapshot(directory, settling=True)
+        self.assertEqual(self.status(), "In progress")
+        self.sdk_snapshot(directory)
+        self.assertEqual(self.status(), "Done")
+
+    def test_sdk_idle_does_not_override_root_work_or_attention(self):
+        directory = self.session(events=[event("assistant.turn_start")])
+        self.sdk_snapshot(directory)
+        self.assertEqual(self.status(), "In progress")
+        self.sdk_snapshot(directory, pending_shells=1)
+        self.write(directory, [event("hook.start", hookType="notification", input={
+            "notification_type": "permission_prompt", "sessionId": "root"})], "a")
+        self.assertEqual(self.status(), "Needs input")
+
+    def test_sdk_stale_unavailable_and_invalid_data_report_unknown(self):
+        directory = self.session()
+        for overrides in (
+                {"updated_at": time.time() - 16}, {"updated_at": time.time() + 30},
+                {"updated_at": float("nan")}, {"state": "task_query_failed"},
+                {"state": "stopped"}, {"state": "starting"},
+                {"owner_pid": 99}, {"session_id": "other"},
+                {"pending_shells": -1}, {"pending_shells": True},
+                {"settling": "false"}, {"protocol_version": 2}):
+            with self.subTest(overrides=overrides):
+                self.sdk_snapshot(directory, **overrides)
+                snapshot = self.scanner.snapshot()
+                self.assertEqual(snapshot["sessions"][0]["status"], "Unknown")
+                self.assertTrue(any("SDK bridge:" in error for error in snapshot["errors"]))
+        self.sdk_snapshot(directory, pending_shells=1)
+        self.assertEqual(self.status(), "In progress")
+
+    def test_sdk_null_or_malformed_file_is_not_absence(self):
+        directory = self.session()
+        for contents in ("null", "{", "[]"):
+            (directory / "gadget-sdk.json").write_text(contents)
+            snapshot = self.scanner.snapshot()
+            self.assertEqual(snapshot["sessions"][0]["status"], "Unknown")
+            self.assertTrue(snapshot["errors"])
+
+    def test_sdk_scope_does_not_affect_other_sessions_or_publish_private_fields(self):
+        directory = self.session()
+        self.session("other")
+        self.sdk_snapshot(directory, pending_shells=1, command="synthetic-private-command")
+        snapshot = self.scanner.snapshot()
+        self.assertEqual({row["id"]: row["status"] for row in snapshot["sessions"]},
+                         {"root": "In progress", "other": "Done"})
+        self.assertNotIn("synthetic-private-command", json.dumps(snapshot))
+
+    def test_sdk_failure_retains_transcript_reader_and_legacy_override_is_live(self):
+        directory = self.session()
+        self.sdk_snapshot(directory, pending_shells=1)
+        self.assertEqual(self.status(), "In progress")
+        reader = next(iter(self.scanner.readers.values()))[0]
+        self.sdk_snapshot(directory, state="stopped")
+        self.assertEqual(self.scanner.snapshot()["sessions"][0]["status"], "Unknown")
+        self.assertIs(reader, next(iter(self.scanner.readers.values()))[0])
+        (self.home / "copilot-agent-notify.json").write_text('{"status_backend":"legacy"}')
+        self.assertEqual(self.status(), "Done")
+        self.assertIs(reader, next(iter(self.scanner.readers.values()))[0])
+
+    def test_sdk_disappearance_is_unknown_until_explicit_override(self):
+        directory = self.session()
+        self.sdk_snapshot(directory)
+        self.assertEqual(self.status(), "Done")
+        (directory / "gadget-sdk.json").unlink()
+        self.assertEqual(self.scanner.snapshot()["sessions"][0]["status"], "Unknown")
+        (self.home / "copilot-agent-notify.json").write_text('{"status_backend":"legacy"}')
+        self.assertEqual(self.status(), "Done")
+
     def test_busy_done_resume_input_and_process_close(self):
         directory = self.session(events=[event("assistant.turn_start")])
         self.assertEqual(self.status(), "In progress")

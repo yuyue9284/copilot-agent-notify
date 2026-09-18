@@ -100,6 +100,15 @@ are discovered about every ten seconds. Large session histories may take
 several refreshes to load. Activity that starts and ends entirely between polls
 may not be observed.
 
+Status selection is automatic: sessions use transcript tracking, supplemented
+by structured background-shell status when the optional
+[SDK bridge prototype](docs/sdk-bridge.md) is running. No backend choice is
+needed in the UI. Advanced troubleshooting can set `"status_backend": "legacy"`
+in `~/.copilot/copilot-agent-notify.json` (or under `COPILOT_HOME`) for the
+affected OS user. Preserve other settings when editing this file.
+The bridge is not installed automatically; without it, a background shell that
+outlives its tool invocation may still be missed.
+
 ## Everyday controls
 
 | Control | Use |
@@ -168,7 +177,8 @@ not copied prompt or tool-result text. Diagnostic snapshots also contain session
 metadata. Review and redact screenshots, snapshots, and logs before sharing them
 in an issue or anywhere public.
 
-Status is inferred from transcript events, not a guaranteed task-completion API.
+Status uses transcript inference and, optionally, the experimental SDK shell
+task registry; it is not a guaranteed task-completion signal.
 Future Copilot CLI changes may require compatibility updates. Closing the
 gadget stops its collectors, not your Copilot sessions.
 
@@ -245,6 +255,12 @@ and hook scripts live in `scripts/`. See the
 [gadget regression tests](docs/reference.md#gadget-regression-tests) and
 [full regression and live-validation guide](docs/reference.md#regression-tests-and-safe-live-validation)
 for commands, dependencies, and platform-specific coverage.
+
+An optional [SDK status bridge prototype](docs/sdk-bridge.md) explores structured
+background-shell tracking, with an isolated live-runtime POC. It is not installed
+automatically; interactive extension compatibility still requires validation.
+The setup notes cover experimental-mode activation and how to distinguish a
+healthy SDK bridge from legacy tracking.
 
 Bug reports are most useful with the affected environment, reproduction steps,
 expected behavior, and a redacted error message. Never include credentials,
