@@ -21,6 +21,7 @@ from outer_progress import OuterProgress
 
 LOG = logging.getLogger("copilot-notify-icons")
 POLL_SECONDS = 1
+SDK_STARTUP_SECONDS = 60
 
 
 def read_json(path, default=None):
@@ -54,6 +55,10 @@ def atomic_json(path, value):
         scratch.unlink(missing_ok=True)
 
 
+class BridgeStarting(ValueError):
+    """A validated SDK snapshot is within its bounded initialization window."""
+
+
 class StatusProvider:
     """Shared transcript baseline with an optional, fail-closed SDK overlay."""
 
@@ -62,6 +67,7 @@ class StatusProvider:
         self.backend = "auto"
         self.configuration_error = None
         self.sdk_sessions = set()
+        self.starting_sessions = {}
 
     def refresh(self):
         try:
@@ -74,12 +80,18 @@ class StatusProvider:
             if backend not in ("auto", "legacy"):
                 raise ValueError("status_backend must be auto or legacy")
             self.backend = backend
+            if backend == "legacy":
+                self.starting_sessions.clear()
             self.configuration_error = None
         except (OSError, ValueError) as error:
             self.configuration_error = "Status backend: " + str(error)
 
     def counts(self, directory, session_id, pid, baseline):
-        return self.status(directory, session_id, pid, baseline)[0]
+        try:
+            return self.status(directory, session_id, pid, baseline)[0]
+        except BridgeStarting:
+            # Terminal indicators have no Loading state; do not imply idle.
+            return (1, baseline[1])
 
     def status(self, directory, session_id, pid, baseline):
         if self.configuration_error:
@@ -107,6 +119,12 @@ class StatusProvider:
                 or not 0 <= value["updated_at"] <= 1e12):
             raise ValueError("SDK bridge: invalid snapshot or owner mismatch")
         age = time.time() - value["updated_at"]
+        if value.get("state") == "starting" and age >= -5:
+            began = self.starting_sessions.setdefault(key, time.monotonic())
+            if age >= SDK_STARTUP_SECONDS or time.monotonic() - began >= SDK_STARTUP_SECONDS:
+                raise ValueError("SDK bridge: initialization timed out; check the extension")
+            raise BridgeStarting("SDK bridge: initializing")
+        self.starting_sessions.pop(key, None)
         if age < -5 or age > 15:
             raise ValueError("SDK bridge: stale status; check the extension")
         if value.get("state") != "ready":
@@ -119,6 +137,7 @@ class StatusProvider:
 
     def retain(self, owners):
         self.sdk_sessions.intersection_update(owners)
+        self.starting_sessions = {key: began for key, began in self.starting_sessions.items() if key in owners}
 
 
 class Lock:
@@ -662,7 +681,7 @@ def run_worker(directory, session, binary):
     identities = {}
     last_error = None
     provider = StatusProvider()
-    previous_status_error = False
+    previous_status_unreliable = False
     with Lock(directory / "registry.lock"):
         if not writer.acquire():
             return 0
@@ -756,9 +775,11 @@ def run_worker(directory, session, binary):
                 outer_counts = tuple(sum(readers[key].display_counts[index] for key in ready)
                                      for index in (0, 1))
                 outer_error = outer.update(
-                    outer_counts, notify_completion=not status_errors and not previous_status_error)
+                    outer_counts, notify_completion=not status_errors and not provider.starting_sessions
+                    and not previous_status_unreliable)
                 # Keep recovery quiet if clearing a terminal failed and must be retried.
-                previous_status_error = bool(status_errors) or (previous_status_error and bool(outer_error))
+                previous_status_unreliable = bool(status_errors or provider.starting_sessions) or (
+                    previous_status_unreliable and bool(outer_error))
                 for key in set(readers) - set(records):
                     del readers[key]
                     del identities[key]

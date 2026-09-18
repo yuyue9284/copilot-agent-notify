@@ -148,6 +148,43 @@ class StatusProviderTests(Files):
         self.snapshot()
         self.assertEqual(self.counts(), (1, 0))
 
+    def test_starting_is_bounded_loading_not_a_stale_ready_snapshot(self):
+        with patch.object(activity.time, "time", return_value=100), \
+                patch.object(activity.time, "monotonic", return_value=200) as clock:
+            self.snapshot(state="starting", pending_shells=0, updated_at=70)
+            with self.assertRaises(activity.BridgeStarting):
+                self.provider.status(self.session, "synthetic", 42, (0, 0))
+            self.assertEqual(self.counts(), (1, 0))
+            self.assertEqual(self.counts((0, 1)), (1, 1))
+            self.snapshot(state="starting", updated_at=40.001)
+            self.assertEqual(self.counts(), (1, 0))
+            self.snapshot(state="starting", updated_at=40)
+            with self.assertRaisesRegex(ValueError, "initialization timed out"):
+                self.counts()
+            self.snapshot(state="starting", updated_at=100)
+            clock.return_value = 260
+            with self.assertRaisesRegex(ValueError, "initialization timed out"):
+                self.counts()
+            self.snapshot(state="ready", pending_shells=0, updated_at=100)
+            self.assertEqual(self.counts(), (0, 0))
+            self.assertFalse(self.provider.starting_sessions)
+            self.snapshot(state="starting", updated_at=100)
+            self.assertEqual(self.counts(), (1, 0))
+            self.provider.retain(set())
+            self.assertFalse(self.provider.starting_sessions)
+
+    def test_startup_grace_does_not_hide_invalid_snapshots_or_real_failures(self):
+        for change in ({"owner_pid": 99}, {"session_id": "other"},
+                       {"updated_at": time.time() + 30}, {"pending_shells": -1},
+                       {"state": "initialization_failed"}, {"state": "stopped"},
+                       {"state": "task_query_failed"}, {"state": "activity_query_failed"},
+                       {"state": "ready", "updated_at": time.time() - 16}):
+            with self.subTest(change=change):
+                self.snapshot(**dict({"state": "starting"}, **change))
+                with self.assertRaises(ValueError) as caught:
+                    self.provider.status(self.session, "synthetic", 42, (0, 0))
+                self.assertNotIsInstance(caught.exception, activity.BridgeStarting)
+
 
 class ReducerTests(unittest.TestCase):
     def setUp(self):
@@ -622,6 +659,19 @@ class RuntimeTests(Files):
         status = activity.read_json(self.cache / "status.json")
         self.assertEqual(status["status_backend"], "legacy")
         self.assertIsNone(status["error"])
+
+    def test_sdk_initialization_has_no_terminal_warning_and_recovers(self):
+        path = self.transcript("a", [])
+        snapshot = dict(protocol_version=1, session_id="a", owner_pid=os.getpid(),
+                        updated_at=time.time() - 30, state="starting", pending_shells=0, settling=False)
+        activity.atomic_json(path.parent / "gadget-sdk.json", snapshot)
+        self.assert_process(self.launch())
+        self.wait_for(lambda s: s["tabs"][0]["name"] == activity.prefix((1, 0)) + "work"
+                      and activity.read_json(self.cache / "status.json", {}).get("error") is None)
+        snapshot.update(state="ready", updated_at=time.time())
+        activity.atomic_json(path.parent / "gadget-sdk.json", snapshot)
+        self.wait_for(lambda s: s["tabs"][0]["name"] == "work"
+                      and activity.read_json(self.cache / "status.json", {}).get("error") is None)
 
     def launch(self, session="a", pane="1", hook="sessionStart", extra=None):
         payload = {"sessionId": session}

@@ -12,7 +12,8 @@ import sys
 import threading
 import time
 
-from activity import Activity, StatusProvider, Transcript, atomic_json, process_token, read_json, state_directory
+from activity import (Activity, BridgeStarting, StatusProvider, Transcript, atomic_json,
+                      process_token, read_json, state_directory)
 
 
 BACKGROUND_COMPLETION_GRACE_SECONDS = 10
@@ -252,6 +253,8 @@ class Scanner:
                             directory, session_id, owner[0], transcript.display_counts)
                         busy, attention = counts
                         row["status"] = "Needs input" if attention else "In progress" if busy else "Done"
+                    except BridgeStarting:
+                        row["status"] = "Needs input" if transcript.display_counts[1] else "Loading"
                     except ValueError as error:
                         row["status"] = "Unknown"
                         errors.append("%s: %s" % (session_id, error))

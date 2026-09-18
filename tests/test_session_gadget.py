@@ -104,7 +104,7 @@ class ScannerTests(unittest.TestCase):
         for overrides in (
                 {"updated_at": time.time() - 16}, {"updated_at": time.time() + 30},
                 {"updated_at": float("nan")}, {"state": "task_query_failed"},
-                {"state": "stopped"}, {"state": "starting"},
+                {"state": "stopped"}, {"state": "initialization_failed"},
                 {"owner_pid": 99}, {"session_id": "other"},
                 {"pending_shells": -1}, {"pending_shells": True},
                 {"settling": "false"}, {"protocol_version": 2}):
@@ -115,6 +115,40 @@ class ScannerTests(unittest.TestCase):
                 self.assertTrue(any("SDK bridge:" in error for error in snapshot["errors"]))
         self.sdk_snapshot(directory, pending_shells=1)
         self.assertEqual(self.status(), "In progress")
+
+    def test_sdk_startup_and_session_handoff_show_loading_without_warnings(self):
+        directory = self.session()
+        self.sdk_snapshot(directory, latest_activity="Previous synthetic activity")
+        self.assertEqual(self.status(), "Done")
+        reader = next(iter(self.scanner.readers.values()))[0]
+        self.sdk_snapshot(directory, state="starting", updated_at=time.time() - 32)
+        snapshot = self.scanner.snapshot()
+        self.assertEqual(snapshot["errors"], [])
+        self.assertEqual(snapshot["sessions"][0]["status"], "Loading")
+        self.assertEqual(snapshot["sessions"][0]["latest_activity"], "")
+        self.assertIs(reader, next(iter(self.scanner.readers.values()))[0])
+        self.sdk_snapshot(directory)
+        self.assertEqual(self.status(), "Done")
+        self.sdk_snapshot(directory, state="starting", updated_at=time.time() - 60)
+        snapshot = self.scanner.snapshot()
+        self.assertEqual(snapshot["sessions"][0]["status"], "Unknown")
+        self.assertTrue(any("initialization timed out" in e for e in snapshot["errors"]))
+
+    def test_sdk_startup_preserves_transcript_input_requests(self):
+        directory = self.session(events=[event("hook.start", hookType="notification", input={
+            "notification_type": "permission_prompt", "sessionId": "root"})])
+        self.sdk_snapshot(directory, state="starting", updated_at=time.time() - 32)
+        self.assertEqual(self.status(), "Needs input")
+
+    def test_startup_grace_is_scoped_to_session_not_shared_copilot_process(self):
+        starting = self.session("starting")
+        stale = self.session("stale")
+        self.sdk_snapshot(starting, state="starting", updated_at=time.time() - 32)
+        self.sdk_snapshot(stale, updated_at=time.time() - 16)
+        snapshot = self.scanner.snapshot()
+        self.assertEqual({row["id"]: row["status"] for row in snapshot["sessions"]},
+                         {"starting": "Loading", "stale": "Unknown"})
+        self.assertEqual(snapshot["errors"], ["stale: SDK bridge: stale status; check the extension"])
 
     def test_sdk_null_or_malformed_file_is_not_absence(self):
         directory = self.session()

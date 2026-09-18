@@ -118,7 +118,17 @@ The file remains local and must not be committed or included in public reports.
 The shared `StatusProvider` in `scripts/activity.py` supplies both the gadget
 collector and Zellij/Windows Terminal coordinator. It uses the snapshot only
 for the matching session and owner PID.
-A present but invalid, stopped, failed, or more-than-15-seconds-old snapshot
+A validated `starting` snapshot gets up to 60 seconds for initialization during
+extension startup or a session switch. The gadget shows **Loading** without a
+warning (transcript input requests still show **Needs input**). Terminal indicators
+remain working, without treating successful initialization as a completion.
+The startup window is bounded by both snapshot age and a collector-local monotonic
+timer, so repeatedly rewriting `starting` cannot indefinitely hide a stuck bridge.
+If initialization exceeds this window, the gadget shows **Unknown** with an
+initialization-timeout warning. Invalid snapshots and explicit failures are not
+given this grace.
+
+A present but invalid, stopped, failed, or more-than-15-seconds-old ready snapshot
 produces gadget **Unknown** and an error, never a false **Done**. Terminal
 indicators show the existing attention marker, and the coordinator's local
 `status.json` and log report the bridge error. Recovery to idle does not ring a

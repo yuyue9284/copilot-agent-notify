@@ -96,7 +96,7 @@ configuration, collector files, and notification helper.
 | **In progress** | The main agent or a background agent is working, or a background-completion grace period is pending |
 | **Needs input** | A permission or input request is waiting |
 | **Done** | No tracked work remains; the Copilot session is still open |
-| **Loading** | Session history is still being read |
+| **Loading** | Session history is being read, or the SDK bridge is initializing during startup/session switching |
 | **Unknown** | Session activity cannot be read reliably; check the displayed error |
 
 **Done means idle, not successful.** The gadget does not judge whether code,
