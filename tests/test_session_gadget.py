@@ -73,6 +73,23 @@ class ScannerTests(unittest.TestCase):
         self.sdk_snapshot(directory)
         self.assertEqual(self.status(), "Done")
 
+    def test_latest_activity_is_optional_validated_and_hidden_on_bridge_failure(self):
+        directory = self.session()
+        self.sdk_snapshot(directory, latest_activity="Checking synthetic tests")
+        row = self.scanner.snapshot()["sessions"][0]
+        self.assertEqual(row["latest_activity"], "Checking synthetic tests")
+        for overrides in ({"latest_activity": None}, {"latest_activity": "x" * 241},
+                          {"latest_activity": "Old intent", "state": "stopped"}):
+            self.sdk_snapshot(directory, **overrides)
+            row = self.scanner.snapshot()["sessions"][0]
+            self.assertEqual(row["status"], "Unknown")
+            self.assertEqual(row["latest_activity"], "")
+        self.sdk_snapshot(directory)
+        self.assertEqual(self.scanner.snapshot()["sessions"][0]["latest_activity"], "")
+        self.sdk_snapshot(directory, latest_activity="Checking synthetic tests")
+        (self.home / "copilot-agent-notify.json").write_text('{"status_backend":"legacy"}')
+        self.assertEqual(self.scanner.snapshot()["sessions"][0]["latest_activity"], "")
+
     def test_sdk_idle_does_not_override_root_work_or_attention(self):
         directory = self.session(events=[event("assistant.turn_start")])
         self.sdk_snapshot(directory)

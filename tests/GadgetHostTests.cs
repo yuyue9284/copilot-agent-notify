@@ -58,6 +58,14 @@ public static class GadgetHostTests
         var parsed = Sample();
         Check(parsed.Sessions[0].State == SessionStatus.Done, "enum status");
         Check(parsed.Sessions[0].activity_revision == "exact:001", "revision changed");
+        Check(parsed.Sessions[0].latest_activity == "", "old collector activity compatibility");
+        string withActivity = Valid.Replace("\"pid\":42", "\"latest_activity\":\"Checking synthetic tests\",\"pid\":42");
+        Check(SnapshotProtocol.ParseCollector(withActivity).Sessions[0].latest_activity == "Checking synthetic tests",
+              "activity lost in collector protocol");
+        Reject(() => SnapshotProtocol.ParseCollector(Valid.Replace("\"pid\":42", "\"latest_activity\":42,\"pid\":42")),
+               "non-string latest activity");
+        Reject(() => SnapshotProtocol.ParseCollector(withActivity.Replace("Checking synthetic tests", new string('x', 241))),
+               "unbounded latest activity");
         foreach (string invalid in new[] { "null", "[]", "{", "{}",
             Valid.Replace("\"protocol_version\":1", "\"protocol_version\":\"1\""),
             Valid.Replace("\"protocol_version\":1", "\"protocol_version\":true"),

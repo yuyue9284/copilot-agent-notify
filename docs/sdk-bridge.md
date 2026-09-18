@@ -77,12 +77,31 @@ COPILOT_HOME/session-state/SESSION_ID/gadget-sdk.json
   "updated_at": 1700000000,
   "state": "ready",
   "pending_shells": 1,
-  "settling": false
+  "settling": false,
+  "latest_activity": "Checking synthetic tests"
 }
 ```
 
-Commands, descriptions, tool output, prompts, and shell IDs are not copied into
-this file. Error states use fixed labels rather than raw RPC errors.
+The optional `latest_activity` field carries the most recently received
+main-agent activity: `assistant.intent`, `tool.execution_progress` messages, or
+the short `arguments.description` from a tool-start event. Tool starts without
+a description show `Using <tool name>`, never raw commands or file arguments.
+The latest of these events wins. Text is normalized to one line and limited to
+240 UTF-16 code units by the bridge. Child activity is ignored. It is cleared on a
+new main-agent turn, retained after completion as the **latest** activity (not a
+claim of ongoing work), and omitted from display while bridge health is unknown.
+It is blank until an activity event arrives; past activity is not replayed on bridge
+startup. Older bridge snapshots without this field remain supported.
+
+The gadget's **Latest activity** column is visible by default and can be hidden
+with **Appearance > Show latest activity**. This preference persists in
+`gadget-ui.json`; it controls display only, not local collection. Legacy sessions
+remain blank. Activity text is not included in desktop notification bodies.
+
+Commands, raw tool output, prompts, and shell IDs are not copied
+directly into this file, but activity descriptions may themselves contain private task details
+or paths. Review it before sharing snapshots or screenshots.
+Error states use fixed labels rather than raw RPC errors.
 The file remains local and must not be committed or included in public reports.
 
 The shared `StatusProvider` in `scripts/activity.py` supplies both the gadget

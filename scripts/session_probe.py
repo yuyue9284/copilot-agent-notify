@@ -223,7 +223,7 @@ class Scanner:
             keep.add(key)
             status_owners.add((str(directory), session_id, owner[0]))
             row = {"id": session_id, "pid": owner[0], "title": session_id[:8],
-                   "cwd": "", "status": "Loading", "activity_revision": None}
+                   "cwd": "", "status": "Loading", "activity_revision": None, "latest_activity": ""}
             try:
                 reader = self.readers.get(key)
                 if reader is None:
@@ -248,8 +248,9 @@ class Scanner:
                     if transcript.state.shutdown:
                         continue
                     try:
-                        busy, attention = self.status_provider.counts(
+                        counts, row["latest_activity"] = self.status_provider.status(
                             directory, session_id, owner[0], transcript.display_counts)
+                        busy, attention = counts
                         row["status"] = "Needs input" if attention else "In progress" if busy else "Done"
                     except ValueError as error:
                         row["status"] = "Unknown"

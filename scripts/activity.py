@@ -79,10 +79,13 @@ class StatusProvider:
             self.configuration_error = "Status backend: " + str(error)
 
     def counts(self, directory, session_id, pid, baseline):
+        return self.status(directory, session_id, pid, baseline)[0]
+
+    def status(self, directory, session_id, pid, baseline):
         if self.configuration_error:
             raise ValueError(self.configuration_error)
         if self.backend == "legacy":
-            return baseline
+            return baseline, ""
         key = (str(directory), session_id, pid)
         missing = object()
         try:
@@ -93,7 +96,7 @@ class StatusProvider:
         if value is missing:
             if key in self.sdk_sessions:
                 raise ValueError("SDK bridge: status disappeared; check the extension")
-            return baseline
+            return baseline, ""
         self.sdk_sessions.add(key)
         if (not isinstance(value, dict) or type(value.get("protocol_version")) is not int
                 or value["protocol_version"] != 1 or value.get("session_id") != session_id
@@ -108,8 +111,11 @@ class StatusProvider:
             raise ValueError("SDK bridge: stale status; check the extension")
         if value.get("state") != "ready":
             raise ValueError("SDK bridge: unavailable; check the extension")
+        latest = value.get("latest_activity", "")
+        if not isinstance(latest, str) or len(latest) > 240:
+            raise ValueError("SDK bridge: invalid latest activity")
         busy, attention = baseline
-        return (int(bool(busy or value["pending_shells"] or value["settling"])), attention)
+        return (int(bool(busy or value["pending_shells"] or value["settling"])), attention), latest
 
     def retain(self, owners):
         self.sdk_sessions.intersection_update(owners)

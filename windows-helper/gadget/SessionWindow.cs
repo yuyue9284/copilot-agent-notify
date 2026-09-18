@@ -43,6 +43,7 @@ namespace CopilotSessions
         public string Cwd { get { return data.cwd; } }
         public string Status { get { return data.status; } }
         public string ActivityRevision { get { return data.activity_revision; } }
+        public string LatestActivity { get { return Status == "Unknown" || Status == "Loading" ? "" : data.latest_activity ?? ""; } }
         public bool CanForget { get { return ActivityRevision != null && Status != "Loading" && Status != "Unknown"; } }
         public string StatusLabel { get { return Status == "Done" && Unread ? "Done \u00B7 New" : Status; } }
         public int Pid { get { return data.pid; } }
@@ -138,6 +139,7 @@ namespace CopilotSessions
         internal string InterfaceFontFamily { get; private set; }
         internal int InterfaceFontSize { get; private set; }
         internal bool NotificationsEnabled { get; private set; }
+        internal bool ShowLatestActivity { get; private set; }
         public int UnreadCount { get { return Rows.Count(row => row.Unread); } }
 
         internal readonly WindowBackdrop Backdrop;
@@ -200,6 +202,7 @@ namespace CopilotSessions
             InterfaceFontFamily = DefaultInterfaceFontFamily;
             InterfaceFontSize = DefaultInterfaceFontSize;
             NotificationsEnabled = true;
+            ShowLatestActivity = true;
             bool initialCompact = LoadPreferences();
             Backdrop = new WindowBackdrop(Window);
             Backdrop.Changed += delegate { UpdatePopupAppearance(); };
@@ -226,6 +229,7 @@ namespace CopilotSessions
                 string fontFamily = DefaultInterfaceFontFamily;
                 int fontSize = DefaultInterfaceFontSize;
                 bool notifications = true;
+                bool showActivity = true;
                 if (values.ContainsKey("appearance"))
                 {
                     string mode = values["appearance"] as string;
@@ -259,6 +263,13 @@ namespace CopilotSessions
                         throw new ArgumentException("Expected a boolean notifications preference.");
                     notifications = (bool)values["notifications"];
                 }
+                if (values.ContainsKey("show_latest_activity"))
+                {
+                    if (!(values["show_latest_activity"] is bool))
+                        throw new ArgumentException("Expected a boolean show_latest_activity preference.");
+                    showActivity = (bool)values["show_latest_activity"];
+                }
+                ShowLatestActivity = showActivity;
                 Appearance = appearance;
                 OpacityPercent = opacity;
                 InterfaceFontFamily = fontFamily;
@@ -311,6 +322,7 @@ namespace CopilotSessions
                         menu.Items.OfType<MenuItem>().First(item => item.IsChecked)
                     };
                     controls.Add((MenuItem)Window.FindName("DesktopNotifications"));
+                    controls.Add((MenuItem)Window.FindName("ShowLatestActivity"));
                     if (slider.IsEnabled) controls.Add(slider);
                     controls.Add(fontFamily);
                     controls.Add(fontSize);
@@ -333,6 +345,13 @@ namespace CopilotSessions
             ((MenuItem)Window.FindName("DesktopNotifications")).Click += delegate
             {
                 ChangeNotifications(!NotificationsEnabled);
+            };
+            ((MenuItem)Window.FindName("ShowLatestActivity")).Click += delegate
+            {
+                if (SavePreferences(IsCompact, Appearance, OpacityPercent, InterfaceFontFamily,
+                                    InterfaceFontSize, NotificationsEnabled, !ShowLatestActivity))
+                    ShowLatestActivity = !ShowLatestActivity;
+                SynchronizePreferenceControls();
             };
             slider.ValueChanged += delegate
             {
@@ -454,6 +473,8 @@ namespace CopilotSessions
                 fontSize.Value = InterfaceFontSize;
                 ((TextBlock)Window.FindName("FontSizeLabel")).Text = "Font size: " + InterfaceFontSize;
                 ((MenuItem)Window.FindName("DesktopNotifications")).IsChecked = NotificationsEnabled;
+                ((MenuItem)Window.FindName("ShowLatestActivity")).IsChecked = ShowLatestActivity;
+                Grid.Columns[4].Visibility = ShowLatestActivity ? Visibility.Visible : Visibility.Collapsed;
             }
             finally { updatingPreferences = false; }
         }
@@ -550,6 +571,7 @@ namespace CopilotSessions
             Grid.Columns[1].Width = compact ? 112 : 155;
             Grid.Columns[2].Width = compact ? 124 : 156;
             Grid.Columns[3].Width = 106;
+            Grid.Columns[4].Width = compact ? 200 : 280;
             Grid.Columns[0].MinWidth = compact ? 100 : 170;
             Grid.Columns[3].Visibility = compact ? Visibility.Collapsed : Visibility.Visible;
             UpdateMinimumSize();
@@ -559,7 +581,7 @@ namespace CopilotSessions
         }
 
         private bool SavePreferences(bool compact, AppearancePreference appearance, int opacity,
-                                     string fontFamily, int fontSize, bool notifications)
+                                     string fontFamily, int fontSize, bool notifications, bool? showActivity = null)
         {
             try
             {
@@ -570,7 +592,7 @@ namespace CopilotSessions
                     File.WriteAllText(scratch, new JavaScriptSerializer().Serialize(
                         new { compact = compact, appearance = appearance.ToString().ToLowerInvariant(),
                               opacity = opacity, font_family = fontFamily, font_size = fontSize,
-                              notifications = notifications }));
+                              notifications = notifications, show_latest_activity = showActivity ?? ShowLatestActivity }));
                     if (File.Exists(preferencesPath)) File.Replace(scratch, preferencesPath, null);
                     else File.Move(scratch, preferencesPath);
                 }

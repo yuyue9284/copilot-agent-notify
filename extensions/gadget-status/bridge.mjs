@@ -65,6 +65,7 @@ export function createBridge(session, {
     let revision = 0;
     let closed = false;
     let lastError = null;
+    let latestActivity = "";
 
     async function emit(state, count = 0, settling = false) {
         writing = publish({
@@ -75,6 +76,7 @@ export function createBridge(session, {
             state,
             pending_shells: count,
             settling,
+            latest_activity: state === "ready" ? latestActivity : "",
         });
         await writing;
     }
@@ -116,7 +118,34 @@ export function createBridge(session, {
     }
 
     const unsubscribe = session.on(event => {
+        const root = !event.agentId || event.agentId === sessionId;
+        let activity;
+        if (root && event.type === "assistant.intent") {
+            if (typeof event.data?.intent !== "string") {
+                report("Gadget SDK bridge: invalid assistant intent.");
+                return;
+            }
+            activity = event.data.intent;
+        } else if (root && event.type === "tool.execution_progress") {
+            if (typeof event.data?.progressMessage !== "string") {
+                report("Gadget SDK bridge: invalid tool progress.");
+                return;
+            }
+            activity = event.data.progressMessage;
+        } else if (root && event.type === "tool.execution_start") {
+            const description = event.data?.arguments?.description;
+            if (typeof description === "string" && description.trim()) {
+                activity = description;
+            } else if (typeof event.data?.toolName === "string") {
+                activity = `Using ${event.data.toolName}`;
+            }
+        }
+        if (activity !== undefined) {
+            latestActivity = activity.replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, " ")
+                .replace(/\s+/g, " ").trim().slice(0, 240).replace(/[\ud800-\udbff]$/, "");
+        }
         if (event.type === "assistant.turn_start" && (!event.agentId || event.agentId === sessionId)) {
+            latestActivity = "";
             rootGeneration++;
             rootActive = true;
             settleUntil = 0;
@@ -125,7 +154,8 @@ export function createBridge(session, {
             rootActive = false;
         }
         if (["session.background_tasks_changed", "system.notification",
-             "tool.execution_complete", "assistant.turn_start", "session.idle"].includes(event.type)) {
+             "tool.execution_start", "tool.execution_progress", "tool.execution_complete",
+             "assistant.turn_start", "session.idle", "assistant.intent"].includes(event.type)) {
             revision++;
             if (!refreshTimer) {
                 refreshTimer = setTimeout(() => {

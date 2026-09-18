@@ -58,9 +58,39 @@ test("query snapshots contain only allowlisted metadata and no command text", as
     await f.bridge.refresh();
     assert.deepEqual(f.last, {
         protocol_version: 1, session_id: "synthetic-session", owner_pid: 42,
-        updated_at: 101, state: "ready", pending_shells: 1, settling: false,
+        updated_at: 101, state: "ready", pending_shells: 1, settling: false, latest_activity: "",
     });
     assert.ok(!JSON.stringify(f.output).includes("PRIVATE"));
+});
+
+test("latest activity follows root intent, is bounded, and clears on a new turn", async () => {
+    const f = fixture();
+    try {
+        f.event({ type: "assistant.intent", data: { intent: "  Checking\nsynthetic tests\u202e  " } });
+        await delay(100);
+        assert.equal(f.last.latest_activity, "Checking synthetic tests");
+        f.event({ type: "assistant.intent", agentId: "child", data: { intent: "Child work" } });
+        await f.bridge.refresh();
+        assert.equal(f.last.latest_activity, "Checking synthetic tests");
+        f.event({ type: "session.idle" });
+        await f.bridge.refresh();
+        assert.equal(f.last.latest_activity, "Checking synthetic tests");
+        f.event({ type: "assistant.intent", data: { intent: "x".repeat(300) } });
+        await f.bridge.refresh();
+        assert.equal(f.last.latest_activity.length, 240);
+        f.event({ type: "assistant.intent", data: { intent: "x".repeat(239) + "\u{1f680}" } });
+        await f.bridge.refresh();
+        assert.equal(f.last.latest_activity, "x".repeat(239));
+        f.list = async () => { throw new Error("synthetic"); };
+        await f.bridge.refresh();
+        assert.equal(f.last.latest_activity, "");
+        f.list = async () => ({ tasks: [] });
+        f.event({ type: "assistant.turn_start" });
+        await f.bridge.refresh();
+        assert.equal(f.last.latest_activity, "");
+    } finally {
+        await f.bridge.stop();
+    }
 });
 
 test("shell completion holds status for exactly ten seconds", async () => {
@@ -76,6 +106,33 @@ test("shell completion holds status for exactly ten seconds", async () => {
     f.clock = 11000;
     await f.bridge.refresh();
     assert.equal(f.last.settling, false);
+});
+
+test("sessions without intents publish tool descriptions and progress, never raw commands", async () => {
+    const f = fixture();
+    try {
+        f.event({ type: "tool.execution_start", data: {
+            toolName: "bash", arguments: { description: "Checking synthetic fixtures", command: "PRIVATE COMMAND" },
+        } });
+        await delay(100);
+        assert.equal(f.last.latest_activity, "Checking synthetic fixtures");
+        f.event({ type: "tool.execution_progress", data: { progressMessage: "Completed 2 of 3 checks" } });
+        await f.bridge.refresh();
+        assert.equal(f.last.latest_activity, "Completed 2 of 3 checks");
+        f.event({ type: "tool.execution_progress", agentId: "child",
+            data: { progressMessage: "Child status" } });
+        await f.bridge.refresh();
+        assert.equal(f.last.latest_activity, "Completed 2 of 3 checks");
+        f.event({ type: "tool.execution_start", data: {
+            toolName: "view", arguments: { path: "/synthetic/private/path" },
+        } });
+        await f.bridge.refresh();
+        assert.equal(f.last.latest_activity, "Using view");
+        assert.ok(!JSON.stringify(f.output).includes("PRIVATE COMMAND"));
+        assert.ok(!JSON.stringify(f.output).includes("/synthetic/private/path"));
+    } finally {
+        await f.bridge.stop();
+    }
 });
 
 test("historical completed tasks do not start a grace period", async () => {

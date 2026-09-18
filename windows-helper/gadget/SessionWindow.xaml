@@ -486,9 +486,15 @@
                       AutomationProperties.Name="Desktop notifications"
                       ToolTip="Notify when an observed session needs input or finishes"/>
             <Separator Background="#334156" Margin="8,4"/>
+            <MenuItem x:Name="ShowLatestActivity" Header="Show _latest activity" IsCheckable="True"
+                      StaysOpenOnClick="True" Style="{StaticResource AppearanceItemStyle}"
+                      AutomationProperties.AutomationId="ShowLatestActivity"
+                      AutomationProperties.Name="Show latest activity"
+                      ToolTip="Show the latest main-agent intent or tool activity; hiding does not stop local bridge collection"/>
+            <Separator Background="#334156" Margin="8,4"/>
             <MenuItem Style="{StaticResource AppearanceItemStyle}" StaysOpenOnClick="True" Focusable="False">
               <MenuItem.Header>
-                <StackPanel Width="210">
+                <StackPanel Width="210" HorizontalAlignment="Left">
                   <TextBlock x:Name="OpacityLabel" Text="Translucent opacity: 90%" Margin="0,0,0,6"/>
                   <Slider x:Name="AppearanceOpacity" Minimum="50" Maximum="100" Value="90"
                           TickFrequency="1" IsSnapToTickEnabled="True" SmallChange="1" LargeChange="10"
@@ -628,6 +634,15 @@
                   <Setter Property="FontSize" Value="{DynamicResource SmallFontSize}"/>
                   <Setter Property="Foreground" Value="#91A0B5"/>
                   <Setter Property="ToolTip" Value="{Binding Id}"/>
+                </Style>
+              </DataGridTextColumn.ElementStyle>
+            </DataGridTextColumn>
+            <DataGridTextColumn Header="LATEST ACTIVITY" SortMemberPath="LatestActivity"
+                                Binding="{Binding LatestActivity}" Width="280" MinWidth="120">
+              <DataGridTextColumn.ElementStyle>
+                <Style TargetType="TextBlock">
+                  <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
+                  <Setter Property="ToolTip" Value="{Binding LatestActivity}"/>
                 </Style>
               </DataGridTextColumn.ElementStyle>
             </DataGridTextColumn>

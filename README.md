@@ -25,6 +25,9 @@ An independent community project, not an official GitHub or Microsoft product.
   font controls, and solid, translucent, or Acrylic appearance.
 - **Local dismissal.** Forget a session until new activity without stopping
   Copilot or deleting its history.
+- **Latest activity.** With the optional SDK bridge, see the main agent's latest
+  reported intent or tool activity in a separate column. Hide it with **Appearance > Show latest
+  activity**; the choice persists across restarts and layouts.
 
 ## Quick start: Windows gadget
 
@@ -173,7 +176,10 @@ Windows and WSL collectors communicate through local process pipes.
 
 **Session titles, IDs, and working-directory paths appear in the window and
 notifications.** Local caches contain identifiers and activity fingerprints,
-not copied prompt or tool-result text. Diagnostic snapshots also contain session
+not copied prompt or tool-result text. The optional SDK bridge also stores the
+latest main-agent intent or tool activity locally (up to 240 characters), which may contain
+sensitive task details. Hiding the column does not disable this collection.
+Diagnostic snapshots also contain this activity text when available and session
 metadata. Review and redact screenshots, snapshots, and logs before sharing them
 in an issue or anywhere public.
 

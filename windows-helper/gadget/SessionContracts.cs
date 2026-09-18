@@ -46,6 +46,7 @@ namespace CopilotSessions
         public string cwd { get; set; }
         public string status { get { return SessionStatuses.Format(state); } set { state = SessionStatuses.Parse(value); } }
         public string activity_revision { get; set; }
+        public string latest_activity { get; set; }
         public int pid { get; set; }
         [ScriptIgnore]
         public SessionStatus State { get { return state; } set { SessionStatuses.Format(value); state = value; } }
@@ -132,7 +133,10 @@ namespace CopilotSessions
                 var session = new SessionData { id = Text(row, "id", false), pid = (int)pid,
                     title = Text(row, "title", false), cwd = Text(row, "cwd", false),
                     status = Text(row, "status", false), activity_revision = revision,
+                    latest_activity = row.ContainsKey("latest_activity") ? Text(row, "latest_activity", false) : "",
                     source = source ?? Text(row, "source", false) };
+                if (session.latest_activity.Length > 240)
+                    throw new ArgumentException("Latest activity exceeds 240 characters.");
                 if (String.IsNullOrEmpty(session.id) || String.IsNullOrEmpty(session.source))
                     throw new ArgumentException("Session id and source must not be empty.");
                 if (!identities.Add(session.source + "/" + session.id)) throw new ArgumentException("Duplicate session identity.");

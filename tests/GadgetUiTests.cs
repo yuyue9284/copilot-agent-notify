@@ -703,12 +703,24 @@ public static class GadgetUiTests
             Invoke(button);
             focusTrace.Add("After open/pump: " + AppearanceFocusState(app));
             Check(button.ContextMenu.IsOpen, "Appearance button did not open the menu");
+            int activityIndex = button.ContextMenu.Items.IndexOf(app.Window.FindName("ShowLatestActivity"));
+            Check(activityIndex >= 0 && button.ContextMenu.Items[activityIndex + 1] is Separator,
+                  "Opacity controls must be visually separated from the latest-activity toggle");
+            var opacityLabel = (TextBlock)app.Window.FindName("OpacityLabel");
+            var activityToggle = (MenuItem)app.Window.FindName("ShowLatestActivity");
+            var activityHeader = Descendants<ContentPresenter>(activityToggle).First();
+            Check(Math.Abs(opacityLabel.TranslatePoint(new Point(), button.ContextMenu).X -
+                           activityHeader.TranslatePoint(new Point(), button.ContextMenu).X) < 1,
+                  "Opacity label must align with the activity toggle header, not appear nested");
             Press(button.ContextMenu, Key.Tab);
             focusTrace.Add("After Tab/pump: " + AppearanceFocusState(app));
             Check(((MenuItem)app.Window.FindName("DesktopNotifications")).IsKeyboardFocusWithin,
                   "Tab does not reach the desktop-notification toggle");
             Press(button.ContextMenu, Key.Tab);
-            Check(slider.IsKeyboardFocusWithin, "Second Tab does not reach the opacity slider");
+            Check(((MenuItem)app.Window.FindName("ShowLatestActivity")).IsKeyboardFocusWithin,
+                  "Tab does not reach the latest-activity toggle");
+            Press(button.ContextMenu, Key.Tab);
+            Check(slider.IsKeyboardFocusWithin, "Tab does not reach the opacity slider");
             Press(slider, Key.Left);
             Check(app.OpacityPercent == 89, "Keyboard Left did not adjust opacity");
             Press(slider, Key.Right);
@@ -883,7 +895,9 @@ public static class GadgetUiTests
                 "{\"compact\":true,\"font_size\":13.5}", "{\"compact\":true,\"font_size\":\"13\"}",
                 "{\"compact\":true,\"font_size\":null}", "{\"compact\":true,\"font_size\":true}",
                 "{\"compact\":true,\"notifications\":null}", "{\"compact\":true,\"notifications\":1}",
-                "{\"compact\":true,\"notifications\":\"true\"}"
+                "{\"compact\":true,\"notifications\":\"true\"}",
+                "{\"compact\":true,\"show_latest_activity\":null}",
+                "{\"compact\":true,\"show_latest_activity\":\"true\"}"
             };
             foreach (string json in invalid)
             {
@@ -895,7 +909,7 @@ public static class GadgetUiTests
                     Check(!bad.IsCompact && bad.Appearance == AppearancePreference.Auto && bad.OpacityPercent == 90 &&
                           bad.InterfaceFontFamily == SessionWindow.DefaultInterfaceFontFamily &&
                           bad.InterfaceFontSize == SessionWindow.DefaultInterfaceFontSize &&
-                          bad.NotificationsEnabled,
+                          bad.NotificationsEnabled && bad.ShowLatestActivity,
                           "Invalid preference was partially accepted: " + json);
                     Check(((FrameworkElement)bad.Window.FindName("ErrorPanel")).Visibility == Visibility.Visible,
                           "Invalid preference was not surfaced: " + json);
@@ -933,6 +947,11 @@ public static class GadgetUiTests
                       ((Slider)failure.Window.FindName("InterfaceFontSize")).Value ==
                       SessionWindow.DefaultInterfaceFontSize,
                       "Failed font-size save did not revert the slider");
+                ((MenuItem)failure.Window.FindName("ShowLatestActivity")).RaiseEvent(
+                    new RoutedEventArgs(MenuItem.ClickEvent));
+                Check(failure.ShowLatestActivity && failure.Grid.Columns[4].Visibility == Visibility.Visible &&
+                      ((MenuItem)failure.Window.FindName("ShowLatestActivity")).IsChecked,
+                      "Failed activity visibility save did not revert coherently");
                 Press(button.ContextMenu, Key.Escape);
                 ((ToggleButton)failure.Window.FindName("Compact")).IsChecked = true;
                 Check(!failure.IsCompact && ((ToggleButton)failure.Window.FindName("Compact")).IsChecked == false,
@@ -1536,6 +1555,32 @@ public static class GadgetUiTests
             TestAppearanceMenuAdjustment(app);
             TestAppearancePreferences(directory);
             TestColumnResizing(app);
+            var activityToggle = (MenuItem)app.Window.FindName("ShowLatestActivity");
+            Check(app.ShowLatestActivity && app.Grid.Columns[4].Visibility == Visibility.Visible,
+                  "Latest activity should be visible by default");
+            var activitySample = Sample();
+            activitySample.rows[0].latest_activity = "Checking synthetic tests";
+            app.Apply(activitySample);
+            Check(app.Rows.Single(row => row.Id == activitySample.rows[0].id).LatestActivity == "Checking synthetic tests",
+                  "Latest activity not exposed by row");
+            activityToggle.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+            Check(!app.ShowLatestActivity && app.Grid.Columns[4].Visibility == Visibility.Collapsed,
+                  "Latest activity toggle did not hide column");
+            app.SetCompact(true);
+            app.SetCompact(false);
+            var restoredActivity = new SessionWindow(preferences, Notifications);
+            try { Check(!restoredActivity.ShowLatestActivity &&
+                        restoredActivity.Grid.Columns[4].Visibility == Visibility.Collapsed,
+                        "Latest activity visibility did not persist"); }
+            finally { restoredActivity.Window.Close(); }
+            activityToggle.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+            Check(app.ShowLatestActivity && app.Grid.Columns[4].Visibility == Visibility.Visible,
+                  "Latest activity toggle did not restore column");
+            activitySample.rows[0].status = "Unknown";
+            app.Apply(activitySample);
+            Check(app.Rows.Single(row => row.Id == activitySample.rows[0].id).LatestActivity == "",
+                  "Unknown row exposes stale latest activity");
+            app.Apply(Sample());
             Check(app.Window.Icon != null, "Missing application icon");
             foreach (DataGridColumn column in app.Grid.Columns)
             {
