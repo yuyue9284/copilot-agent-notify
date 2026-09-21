@@ -243,6 +243,16 @@ def process_token(pid):
     return value if result.returncode == 0 and value and "Z" not in value.split()[-1] else None
 
 
+def started_at(token):
+    if os.name == "nt":
+        return int(token) / 10000000 - 11644473600
+    if sys.platform.startswith("linux"):
+        boot = next(line.split()[1] for line in Path("/proc/stat").read_text().splitlines()
+                    if line.startswith("btime "))
+        return int(boot) + int(token) / os.sysconf("SC_CLK_TCK")
+    raise OSError("Session discovery supports Windows and Linux only")
+
+
 def process_table():
     if os.name == "nt":
         from ctypes import wintypes
@@ -305,6 +315,70 @@ def find_owner(transcript):
 
 def owner_alive(record):
     return process_token(record["pid"]) == record["token"]
+
+
+class SiblingSessions:
+    """Discover hookless roots only within an already registered CLI/pane scope."""
+
+    def __init__(self):
+        self.seen = {}
+
+    def discover(self, records):
+        if os.name != "nt" and not sys.platform.startswith("linux"):
+            return {}
+        groups = collections.defaultdict(set)
+        for record in records.values():
+            if owner_alive(record):
+                root = Path(record["transcript"]).resolve().parent.parent
+                groups[(root, record["pid"], record["token"])].add(record["pane_id"])
+        found = {}
+        seen = {}
+        for (root, pid, token), panes in groups.items():
+            born = started_at(token)
+            for lock in root.glob("*/inuse.%d.lock" % pid):
+                if lock.parent.is_symlink():
+                    continue
+                path = lock.parent / "events.jsonl"
+                session_id = lock.parent.name
+                key = hashlib.sha256(session_id.encode()).hexdigest()
+                identity = (str(path), pid, token)
+                try:
+                    lock_stat, stat = lock.stat(), path.stat()
+                    fingerprint = (lock_stat.st_dev, lock_stat.st_ino, lock_stat.st_mtime_ns,
+                                   lock_stat.st_ctime_ns, stat.st_size, stat.st_mtime_ns,
+                                   tuple(sorted(panes)))
+                    seen[identity] = fingerprint
+                    if key in records or key in found or self.seen.get(identity) == fingerprint:
+                        continue
+                    if lock_stat.st_mtime + 2 < born:
+                        LOG.warning("sibling discovery ignored a lock older than its CLI owner")
+                        continue
+                    if len(panes) != 1:
+                        LOG.warning("sibling discovery cannot assign a CLI registered in multiple panes")
+                        continue
+                    with path.open("rb") as stream:
+                        line = stream.readline(65536)
+                    if not line.endswith(b"\n"):
+                        if len(line) == 65536:
+                            LOG.warning("sibling discovery transcript header exceeds its size limit")
+                        continue
+                    header = json.loads(line)
+                    if (not isinstance(header, dict) or header.get("type") != "session.start"
+                            or header.get("agentId") or not isinstance(header.get("data"), dict)
+                            or header["data"].get("sessionId") != session_id):
+                        LOG.warning("sibling discovery ignored a non-root transcript")
+                        continue
+                    if process_token(pid) != token:
+                        continue
+                    found[key] = dict(pid=pid, token=token, session_id=session_id,
+                                      pane_id=next(iter(panes)), start_offset=0,
+                                      transcript=str(path), created=time.time(), discovered=True)
+                except FileNotFoundError:
+                    continue
+                except (ValueError, UnicodeDecodeError):
+                    LOG.warning("sibling discovery ignored an invalid transcript header")
+        self.seen = seen
+        return found
 
 
 class Activity:
@@ -681,6 +755,8 @@ def run_worker(directory, session, binary):
     identities = {}
     last_error = None
     provider = StatusProvider()
+    siblings = SiblingSessions()
+    next_sibling_discovery = 0
     previous_status_unreliable = False
     with Lock(directory / "registry.lock"):
         if not writer.acquire():
@@ -696,8 +772,12 @@ def run_worker(directory, session, binary):
                 with Lock(directory / "registry.lock"):
                     records = read_json(directory / "registrations.json", {})
                     for key, record in list(records.items()):
-                        if not owner_alive(record):
+                        lock = Path(record["transcript"]).parent / ("inuse.%d.lock" % record["pid"])
+                        if not owner_alive(record) or (record.get("discovered") and not lock.exists()):
                             del records[key]
+                    if time.monotonic() >= next_sibling_discovery:
+                        records.update(siblings.discover(records))
+                        next_sibling_discovery = time.monotonic() + 5
                     atomic_json(directory / "registrations.json", records)
                     if not records:
                         cleanup_error = None

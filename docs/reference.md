@@ -499,6 +499,17 @@ the caller's pane ID, not focus, and the CLI PID plus process start identity.
 The CLI owner is found among hook ancestors using `inuse.<pid>.lock`; before
 that file exists, the nearest `copilot`/`node` ancestor is used.
 
+On Windows and WSL/Linux, the coordinator also checks about every five seconds
+for additional root sessions belonging to an already registered CLI. This covers
+sessions created within the same CLI that do not run the registration hooks.
+Discovery requires that CLI's live PID/start identity, a current owner lock and
+a matching root transcript header. Siblings inherit the registered pane; if the
+same CLI is registered in multiple panes, discovery warns rather than guessing.
+Other CLIs, child transcripts and locks older than the owner process are excluded.
+Discovered sessions are removed when their owner lock disappears or their root
+shuts down. Unchanged removed transcripts are not continually re-registered.
+This does not change the per-session SDK bridge or CLI taskbar-presence settings.
+
 The coordinator polls about once per second (plus Zellij RPC time), tails
 transcripts incrementally, and re-queries pane-to-tab mappings each cycle.
 Large initial backlogs are processed in bounded batches without publishing

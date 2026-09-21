@@ -1,4 +1,5 @@
 import importlib.util
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -573,6 +574,82 @@ class TitleTests(Files):
         self.assertEqual(self.zellij.tabs["10"]["name"], "work")
 
 
+@unittest.skipUnless(os.name == "nt" or sys.platform.startswith("linux"),
+                     "Sibling discovery requires Windows or Linux process start identities")
+class SiblingDiscoveryTests(Files):
+    def setUp(self):
+        super().setUp()
+        self.pid = os.getpid()
+        self.token = activity.process_token(self.pid)
+        self.root = self.directory / "session-state"
+        path = self.transcript("anchor")
+        self.anchor = dict(pid=self.pid, token=self.token, pane_id="1", session_id="anchor",
+                           transcript=str(path), created=time.time(), start_offset=path.stat().st_size)
+        self.records = {self.key("anchor"): self.anchor}
+        self.discovery = activity.SiblingSessions()
+
+    @staticmethod
+    def key(session):
+        return hashlib.sha256(session.encode()).hexdigest()
+
+    def transcript(self, session):
+        path = self.root / session / "events.jsonl"
+        path.parent.mkdir(parents=True)
+        self.write_events(path, [start(session)])
+        (path.parent / ("inuse.%d.lock" % self.pid)).touch()
+        return path
+
+    def test_only_matching_owner_roots_inherit_the_registered_pane(self):
+        sibling = self.transcript("sibling")
+        foreign = self.transcript("foreign")
+        (foreign.parent / ("inuse.%d.lock" % self.pid)).rename(foreign.parent / "inuse.2147483647.lock")
+        found = self.discovery.discover(self.records)
+        self.assertEqual(set(found), {self.key("sibling")})
+        record = found[self.key("sibling")]
+        self.assertEqual((record["pid"], record["token"], record["pane_id"]),
+                         (self.pid, self.token, "1"))
+        self.assertEqual(record["transcript"], str(sibling.resolve()))
+        self.assertEqual(record["start_offset"], 0)
+        self.assertTrue(record["discovered"])
+        self.assertEqual(self.discovery.discover(dict(self.records, **found)), {})
+
+    def test_dead_or_reused_owner_and_stale_locks_cannot_be_adopted(self):
+        sibling = self.transcript("sibling")
+        with patch.object(activity, "process_token", return_value="different-process"):
+            self.assertEqual(self.discovery.discover(self.records), {})
+        lock = sibling.parent / ("inuse.%d.lock" % self.pid)
+        os.utime(lock, (0, 0))
+        with self.assertLogs(activity.LOG, level="WARNING"):
+            self.assertEqual(self.discovery.discover(self.records), {})
+
+    def test_child_or_mismatched_headers_are_rejected_and_partial_headers_retry(self):
+        child = self.transcript("child")
+        self.write_events(child, [event("session.start", agent="child", sessionId="child")])
+        mismatch = self.transcript("mismatch")
+        self.write_events(mismatch, [start("different")])
+        partial = self.transcript("partial")
+        partial.write_text('{"type":"session.start"', encoding="utf-8")
+        with self.assertLogs(activity.LOG, level="WARNING"):
+            self.assertEqual(self.discovery.discover(self.records), {})
+        self.write_events(partial, [start("partial")])
+        self.assertEqual(set(self.discovery.discover(self.records)), {self.key("partial")})
+
+    def test_removed_sessions_are_not_readded_until_their_history_or_lock_changes(self):
+        sibling = self.transcript("sibling")
+        found = self.discovery.discover(self.records)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(self.discovery.discover(self.records), {})
+        self.write_events(sibling, [event("session.resume"), busy()], "a")
+        self.assertEqual(len(self.discovery.discover(self.records)), 1)
+
+    def test_ambiguous_panes_are_not_guessed_and_can_recover(self):
+        self.transcript("sibling")
+        records = dict(self.records, other=dict(self.anchor, pane_id="2"))
+        with self.assertLogs(activity.LOG, level="WARNING"):
+            self.assertEqual(self.discovery.discover(records), {})
+        self.assertEqual(set(self.discovery.discover(self.records)), {self.key("sibling")})
+
+
 class RuntimeTests(Files):
     def setUp(self):
         super().setUp()
@@ -659,6 +736,36 @@ class RuntimeTests(Files):
         status = activity.read_json(self.cache / "status.json")
         self.assertEqual(status["status_backend"], "legacy")
         self.assertIsNone(status["error"])
+
+    def test_hookless_sibling_drives_tab_then_releases_it_without_affecting_anchor(self):
+        self.transcript("a", [])
+        self.assert_process(self.launch())
+        sibling = self.transcript("sibling", [busy()])
+        self.wait_for(lambda s: s["tabs"][0]["name"] == activity.prefix((1, 0)) + "work")
+        records = activity.read_json(self.cache / "registrations.json")
+        discovered = next(record for record in records.values() if record["session_id"] == "sibling")
+        self.assertEqual(discovered["pane_id"], "1")
+        self.assertTrue(discovered["discovered"])
+        self.write_events(sibling, [
+            event("assistant.message", turnId="0", toolRequests=[]),
+            event("assistant.turn_end", turnId="0"),
+        ], "a")
+        self.wait_for(lambda s: s["tabs"][0]["name"] == "work")
+        (sibling.parent / ("inuse.%d.lock" % os.getpid())).unlink()
+        self.wait_for(lambda s: activity.read_json(self.cache / "status.json", {}).get("registrations") == 1)
+        records = activity.read_json(self.cache / "registrations.json")
+        self.assertEqual([record["session_id"] for record in records.values()], ["a"])
+
+    def test_discovered_historical_shutdown_does_not_stay_registered(self):
+        self.transcript("a", [])
+        self.assert_process(self.launch())
+        self.transcript("closed", [busy(), event("session.shutdown")])
+        self.transcript("working", [busy()])
+        self.wait_for(lambda s: s["tabs"][0]["name"] == activity.prefix((1, 0)) + "work")
+        time.sleep(6)
+        records = activity.read_json(self.cache / "registrations.json")
+        self.assertEqual({record["session_id"] for record in records.values()}, {"a", "working"})
+        self.assertIsNone(activity.read_json(self.cache / "status.json").get("error"))
 
     def test_sdk_initialization_has_no_terminal_warning_and_recovers(self):
         path = self.transcript("a", [])

@@ -13,7 +13,7 @@ import threading
 import time
 
 from activity import (Activity, BridgeStarting, StatusProvider, Transcript, atomic_json,
-                      process_token, read_json, state_directory)
+                      process_token, read_json, started_at, state_directory)
 
 
 BACKGROUND_COMPLETION_GRACE_SECONDS = 10
@@ -67,16 +67,6 @@ class ActivityRevision(Activity):
             digest = hashlib.sha256(
                 json.dumps(event, sort_keys=True, ensure_ascii=True).encode("utf-8")).hexdigest()
             self.activity_revision = "%020d/%s" % (stamp, digest)
-
-
-def started_at(token):
-    if os.name == "nt":
-        return int(token) / 10000000 - 11644473600
-    if sys.platform.startswith("linux"):
-        boot = next(line.split()[1] for line in Path("/proc/stat").read_text().splitlines()
-                    if line.startswith("btime "))
-        return int(boot) + int(token) / os.sysconf("SC_CLK_TCK")
-    raise OSError("Session discovery supports Windows and Linux only")
 
 
 def boot_identity():
