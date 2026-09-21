@@ -569,7 +569,7 @@
       <Grid>
         <DataGrid x:Name="Sessions" Background="Transparent" BorderThickness="0"
                   AutoGenerateColumns="False" CanUserAddRows="False" CanUserDeleteRows="False"
-                  CanUserReorderColumns="False" CanUserResizeColumns="True"
+                  CanUserReorderColumns="True" CanUserResizeColumns="True"
                   CanUserSortColumns="True" IsReadOnly="True"
                   SelectionMode="Single" SelectionUnit="FullRow" HeadersVisibility="Column"
                   GridLinesVisibility="None" RowHeaderWidth="0" HorizontalScrollBarVisibility="Auto"
@@ -662,7 +662,7 @@
     </Border>
     <Grid Grid.Row="3" Margin="2,10,2,0">
       <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-      <TextBlock x:Name="Detail" Text="Click a column to sort" Foreground="{StaticResource Muted}"
+      <TextBlock x:Name="Detail" Text="Click a header to sort; drag to reorder" Foreground="{StaticResource Muted}"
                  FontSize="{DynamicResource SmallFontSize}"
                  TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
       <Button x:Name="Forget" Grid.Column="1" Content="Forget" Style="{StaticResource ReadButtonStyle}"

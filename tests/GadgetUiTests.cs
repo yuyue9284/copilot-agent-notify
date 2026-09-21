@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.Specialized;
 using System.ComponentModel;
 using System.IO;
 using System.Linq;
@@ -115,6 +116,10 @@ public static class GadgetUiTests
     private static extern bool CloseDesktop(IntPtr desktop);
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool PostMessage(IntPtr hwnd, int message, IntPtr wparam, IntPtr lparam);
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool GetKeyboardState([Out] byte[] state);
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool SetKeyboardState(byte[] state);
 
     private sealed class BackdropNative : IBackdropNative
     {
@@ -897,7 +902,14 @@ public static class GadgetUiTests
                 "{\"compact\":true,\"notifications\":null}", "{\"compact\":true,\"notifications\":1}",
                 "{\"compact\":true,\"notifications\":\"true\"}",
                 "{\"compact\":true,\"show_latest_activity\":null}",
-                "{\"compact\":true,\"show_latest_activity\":\"true\"}"
+                "{\"compact\":true,\"show_latest_activity\":\"true\"}",
+                "{\"compact\":true,\"column_order\":null}",
+                "{\"compact\":true,\"column_order\":\"Title\"}",
+                "{\"compact\":true,\"column_order\":[]}",
+                "{\"compact\":true,\"column_order\":[\"Title\",\"Title\"]}",
+                "{\"compact\":true,\"column_order\":[\"Unknown\"]}",
+                "{\"compact\":true,\"column_order\":[1]}",
+                "{\"compact\":true,\"column_order\":[null]}"
             };
             foreach (string json in invalid)
             {
@@ -911,6 +923,8 @@ public static class GadgetUiTests
                           bad.InterfaceFontSize == SessionWindow.DefaultInterfaceFontSize &&
                           bad.NotificationsEnabled && bad.ShowLatestActivity,
                           "Invalid preference was partially accepted: " + json);
+                    Check(ColumnOrder(bad).SequenceEqual(new[] { "Title", "Source", "StatusRank", "Id", "LatestActivity" }),
+                          "Invalid preference changed the default column order");
                     Check(((FrameworkElement)bad.Window.FindName("ErrorPanel")).Visibility == Visibility.Visible,
                           "Invalid preference was not surfaced: " + json);
                 }
@@ -1537,8 +1551,258 @@ public static class GadgetUiTests
               "Switching layouts did not restore the documented default column widths");
     }
 
+    private static string[] ColumnOrder(SessionWindow app)
+    {
+        return app.Grid.Columns.OrderBy(column => column.DisplayIndex)
+            .Select(column => column.SortMemberPath).ToArray();
+    }
+
+    private static void TestActivityTooltip(SessionWindow app)
+    {
+        app.Window.Width = 1250;
+        var snapshot = Sample();
+        snapshot.rows[0].latest_activity = "Checking a synthetic activity message longer than the visible column";
+        snapshot.rows[1].latest_activity = "Middle synthetic activity";
+        snapshot.rows[2].latest_activity = "Reviewing synthetic activity";
+        app.Apply(snapshot);
+        Pump();
+        RequireKeyboardFixture(app);
+        var row = app.Rows.Single(item => item.Id == snapshot.rows[0].id);
+        var text = (TextBlock)app.Grid.Columns[4].GetCellContent(row);
+        Check(Object.Equals(text.ToolTip, row.LatestActivity), "Activity tooltip has incorrect content");
+        int unloaded = 0, opened = 0, closed = 0, resets = 0;
+        text.Unloaded += delegate { unloaded++; };
+        text.ToolTipOpening += delegate { opened++; };
+        text.ToolTipClosing += delegate { closed++; };
+        NotifyCollectionChangedEventHandler changed = delegate(object sender, NotifyCollectionChangedEventArgs args)
+        {
+            if (args.Action == NotifyCollectionChangedAction.Reset) resets++;
+        };
+        ((INotifyCollectionChanged)app.Grid.ItemsSource).CollectionChanged += changed;
+        ToolTip tooltip = null;
+        try
+        {
+            ToolTipService.SetInitialShowDelay(text, 0);
+            Check(text.CaptureMouse(), "Could not capture hover input for the owned activity cell");
+            var source = (HwndSource)PresentationSource.FromVisual(app.Window);
+            Point point = source.CompositionTarget.TransformToDevice.Transform(
+                text.TranslatePoint(new Point(20, text.ActualHeight / 2), app.Window));
+            int position = ((int)point.Y << 16) | ((int)point.X & 0xffff);
+            Check(PostMessage(source.Handle, 0x0200, IntPtr.Zero, new IntPtr(position)),
+                  "Could not post native activity hover");
+            for (int attempt = 0; attempt < 50 && tooltip == null; attempt++)
+            {
+                Pump();
+                tooltip = PresentationSource.CurrentSources.OfType<HwndSource>()
+                    .Where(item => item.RootVisual != null)
+                    .SelectMany(item => Descendants<ToolTip>(item.RootVisual))
+                    .SingleOrDefault(item => item.IsOpen && item.PlacementTarget == text);
+                if (tooltip == null) System.Threading.Thread.Sleep(20);
+            }
+            Check(tooltip != null && opened == 1, "Hover did not open the actual activity tooltip");
+            for (int index = 0; index < 3; index++)
+            {
+                app.Apply(snapshot);
+                Pump();
+                Check(Object.ReferenceEquals(text, app.Grid.Columns[4].GetCellContent(row)) &&
+                      unloaded == 0 && resets == 0,
+                      "An identical snapshot recreated the activity cell");
+                Check(tooltip.IsOpen && opened == 1 && closed == 0,
+                      "An identical snapshot interrupted the open activity tooltip");
+            }
+            snapshot.rows[0].latest_activity = "The synthetic activity has now advanced to another step";
+            app.Apply(snapshot);
+            Pump();
+            Check(Object.ReferenceEquals(text, app.Grid.Columns[4].GetCellContent(row)) &&
+                  unloaded == 0 && resets == 0 && text.Text == snapshot.rows[0].latest_activity,
+                  "An activity update recreated the cell or left stale text");
+            Check(tooltip.IsOpen && Object.Equals(tooltip.Content, snapshot.rows[0].latest_activity) &&
+                  opened == 1 && closed == 0, "Activity content did not update inside the open tooltip");
+        }
+        finally
+        {
+            if (tooltip != null) tooltip.IsOpen = false;
+            text.ReleaseMouseCapture();
+            ((INotifyCollectionChanged)app.Grid.ItemsSource).CollectionChanged -= changed;
+        }
+
+        foreach (DataGridColumn column in app.Grid.Columns)
+        foreach (ListSortDirection direction in new[] { ListSortDirection.Ascending, ListSortDirection.Descending })
+        {
+            app.Sort(column, direction);
+            Pump();
+            var selected = app.Rows.Single(item => item.Id == snapshot.rows[1].id);
+            app.Grid.SelectedItem = selected;
+            resets = 0;
+            ((INotifyCollectionChanged)app.Grid.ItemsSource).CollectionChanged += changed;
+            try
+            {
+                bool ascending = direction == ListSortDirection.Ascending;
+                snapshot.rows[0].title = ascending ? "A changed synthetic title" : "Z changed synthetic title";
+                snapshot.rows[0].latest_activity = ascending ? "A new activity" : "Z new activity";
+                snapshot.rows[0].status = ascending ? "Needs input" : "Done";
+                if (column.SortMemberPath == "Source")
+                    snapshot.rows[0].source = ascending ? "Windows" : "WSL:Ubuntu";
+                if (column.SortMemberPath == "Id")
+                    snapshot.rows[0].id = ascending ? "a-synthetic-session" : "z-synthetic-session";
+                app.Apply(snapshot);
+                Pump();
+                var property = typeof(SessionRow).GetProperty(column.SortMemberPath);
+                var expected = ascending
+                    ? app.Rows.OrderBy(item => property.GetValue(item, null))
+                    : app.Rows.OrderByDescending(item => property.GetValue(item, null));
+                if (column.SortMemberPath != "Title") expected = expected.ThenBy(item => item.Title);
+                expected = expected.ThenBy(item => item.Key);
+                Check(app.Grid.Items.Cast<SessionRow>().SequenceEqual(expected),
+                      "Live updates broke sorting: " + column.SortMemberPath + "/" + direction);
+                Check(resets == 0 && app.Grid.SelectedItem == selected,
+                      "Live updates reset the table or changed the selected session");
+            }
+            finally { ((INotifyCollectionChanged)app.Grid.ItemsSource).CollectionChanged -= changed; }
+        }
+        Console.WriteLine("Activity tooltip: native hover, unchanged snapshots, live content, sorting and selection passed.");
+    }
+
+    private static void DragColumnHeader(SessionWindow app, int sourceIndex, int targetIndex)
+    {
+        RequireKeyboardFixture(app);
+        Pump();
+        var headers = Descendants<DataGridColumnHeader>(app.Grid)
+            .Where(header => header.Column != null).ToArray();
+        var from = headers.Single(header => header.Column == app.Grid.Columns[sourceIndex]);
+        var to = headers.Single(header => header.Column == app.Grid.Columns[targetIndex]);
+        var source = (HwndSource)PresentationSource.FromVisual(app.Window);
+        Point start = source.CompositionTarget.TransformToDevice.Transform(
+            from.TranslatePoint(new Point(30, from.ActualHeight / 2), app.Window));
+        Point end = source.CompositionTarget.TransformToDevice.Transform(
+            to.TranslatePoint(new Point(from.Column.DisplayIndex > to.Column.DisplayIndex
+                ? 12 : to.ActualWidth - 12, to.ActualHeight / 2), app.Window));
+        var originalKeys = new byte[256];
+        Check(GetKeyboardState(originalKeys), "Could not capture fixture thread input state");
+        var keys = (byte[])originalKeys.Clone();
+        Action<int, int, Point> mouse = delegate(int message, int buttons, Point point)
+        {
+            keys[1] = (byte)(buttons == 0 ? 0 : 0x80);
+            Check(SetKeyboardState(keys), "Could not set fixture thread mouse-button state");
+            int position = ((int)point.Y << 16) | ((int)point.X & 0xffff);
+            Check(PostMessage(source.Handle, message, new IntPtr(buttons), new IntPtr(position)),
+                  "Could not post native column drag message");
+            Pump();
+        };
+        // WPF checks GetKeyState; keep its button state local to this fixture thread.
+        try
+        {
+            Check(from.CaptureMouse(), "Could not capture mouse input for the owned header");
+            mouse(0x0200, 0, start);
+            mouse(0x0201, 1, start);
+            for (int step = 1; step <= 12; step++)
+                mouse(0x0200, 1, new Point(start.X + (end.X - start.X) * step / 12,
+                                         start.Y + (end.Y - start.Y) * step / 12));
+        }
+        finally
+        {
+            try { mouse(0x0202, 0, end); }
+            finally
+            {
+                from.ReleaseMouseCapture();
+                Check(SetKeyboardState(originalKeys), "Could not restore fixture thread input state");
+            }
+        }
+    }
+
+    private static void TestColumnReordering(string directory)
+    {
+        string root = Path.Combine(directory, "column-preferences");
+        Directory.CreateDirectory(root);
+        string path = Path.Combine(root, "gadget-ui.json");
+        string[] defaults = { "Title", "Source", "StatusRank", "Id", "LatestActivity" };
+        string[] reordered = { "LatestActivity", "Title", "Source", "StatusRank", "Id" };
+        var app = new SessionWindow(path, Notifications);
+        try
+        {
+            app.Window.Width = 1250;
+            app.Apply(Sample());
+            app.Window.Show();
+            Pump();
+            Check(app.Grid.CanUserReorderColumns && app.Grid.Columns.All(column => column.CanUserReorder),
+                  "Column header dragging is disabled");
+            Check(ColumnOrder(app).SequenceEqual(defaults), "Default column order changed");
+            app.Grid.SelectedItem = app.Rows[0];
+            var selected = app.Grid.SelectedItem;
+            app.Sort(app.Grid.Columns[2], ListSortDirection.Descending);
+            int moved = 0;
+            app.Grid.ColumnReordered += delegate { moved++; };
+            DragColumnHeader(app, 4, 0);
+            Check(moved == 1 && ColumnOrder(app).SequenceEqual(reordered),
+                  "Dragging the activity header did not reorder the columns");
+            Check(app.Grid.SelectedItem == selected &&
+                  app.Grid.Columns[2].SortDirection == ListSortDirection.Descending,
+                  "Column dragging changed row selection or sorting");
+            ClickHeader(app, app.Grid.Columns[1]);
+            Check(app.Grid.Columns[1].SortDirection == ListSortDirection.Ascending &&
+                  app.Grid.Items.Cast<SessionRow>().Select(row => row.Source).SequenceEqual(
+                      app.Grid.Items.Cast<SessionRow>().Select(row => row.Source).OrderBy(value => value)),
+                  "Clicking a reordered header sorted the wrong column");
+            var header = Descendants<DataGridColumnHeader>(app.Grid)
+                .Single(item => item.Column == app.Grid.Columns[4]);
+            var gripper = (Thumb)header.Template.FindName("PART_RightHeaderGripper", header);
+            double width = app.Grid.Columns[4].ActualWidth;
+            gripper.RaiseEvent(new DragDeltaEventArgs(24, 0) { RoutedEvent = Thumb.DragDeltaEvent });
+            Pump();
+            Check(Math.Abs(app.Grid.Columns[4].ActualWidth - width - 24) < 1,
+                  "Resizing a reordered header changed the wrong column");
+            app.Apply(Sample());
+            app.SetCompact(true);
+            var activity = (MenuItem)app.Window.FindName("ShowLatestActivity");
+            activity.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+            Check(app.Grid.Columns[4].Visibility == Visibility.Collapsed &&
+                  app.Grid.Columns[3].Visibility == Visibility.Collapsed,
+                  "Reordering changed which columns the activity toggle and compact layout hide");
+            activity.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+            app.SetCompact(false);
+            Check(ColumnOrder(app).SequenceEqual(reordered), "Refresh or layout change reset column order");
+            var restored = new SessionWindow(path, Notifications);
+            try { Check(ColumnOrder(restored).SequenceEqual(reordered), "Column order did not survive restart"); }
+            finally { restored.Window.Close(); }
+
+            File.Delete(path);
+            Directory.CreateDirectory(path);
+            app.Window.Width = 1250;
+            DragColumnHeader(app, 1, 4);
+            Check(moved == 2 && ColumnOrder(app).SequenceEqual(reordered),
+                  "A failed save did not roll back the reordered columns");
+            Check(((TextBlock)app.Window.FindName("ErrorText")).Text.Contains("Cannot save"),
+                  "Column-order save failure was not reported");
+            Check(Directory.GetFiles(root).Length == 0, "Failed column save leaked a scratch file");
+            Directory.Delete(path);
+            DragColumnHeader(app, 1, 4);
+            Check(app.Grid.Columns[1].DisplayIndex == 0 &&
+                  ((FrameworkElement)app.Window.FindName("ErrorPanel")).Visibility == Visibility.Collapsed,
+                  "Column-order save could not recover");
+            DragColumnHeader(app, 1, 3);
+            Check(moved == 4 && app.Grid.Columns[1].DisplayIndex == 4,
+                  "Dragging a header to the right did not reorder it");
+            var recovered = new SessionWindow(path, Notifications);
+            try { Check(ColumnOrder(recovered).SequenceEqual(ColumnOrder(app)),
+                        "Recovered column order did not survive restart"); }
+            finally { recovered.Window.Close(); }
+
+            File.WriteAllText(path, "{\"compact\":false,\"column_order\":[\"StatusRank\",\"Title\"]}");
+            var partial = new SessionWindow(path, Notifications);
+            try { Check(ColumnOrder(partial).SequenceEqual(new[] { "StatusRank", "Title", "Source", "Id", "LatestActivity" }),
+                        "Columns missing from an older preference were not appended in default order"); }
+            finally { partial.Window.Close(); }
+        }
+        finally
+        {
+            app.Window.Close();
+            Directory.Delete(root, true);
+        }
+        Console.WriteLine("Column reordering: native header dragging, persistence, layouts, toggles, sorting and save rollback passed.");
+    }
+
     [STAThread]
-    public static int Main()
+    public static int Main(string[] args)
     {
         var application = new Application();
         string directory = Path.Combine(Path.GetTempPath(), "GadgetUiTests-" + Guid.NewGuid().ToString("N"));
@@ -1550,6 +1814,18 @@ public static class GadgetUiTests
             app.Apply(Sample());
             app.Window.Show();
             Pump();
+            if (args.SequenceEqual(new[] { "--column-reordering" }))
+            {
+                TestAppearancePreferences(directory);
+                TestColumnReordering(directory);
+                return 0;
+            }
+            if (args.SequenceEqual(new[] { "--activity-tooltip" }))
+            {
+                TestActivityTooltip(app);
+                return 0;
+            }
+            Check(args.Length == 0, "Unknown UI test selector");
             TestBackdrop(app);
             TestAppearance(app, preferences);
             TestAppearanceMenuAdjustment(app);

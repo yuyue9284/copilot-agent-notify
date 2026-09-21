@@ -132,6 +132,7 @@ namespace CopilotSessions
         private double comfortableWidth = 900, comfortableHeight = 530;
         private string settingsError;
         private bool updatingPreferences;
+        private string[] columnOrder;
         private IInputElement appearanceReturnFocus;
         public bool IsCompact { get; private set; }
         internal AppearancePreference Appearance { get; private set; }
@@ -167,7 +168,9 @@ namespace CopilotSessions
             }
             Window.TaskbarItemInfo = new TaskbarItemInfo();
             Grid = (DataGrid)Window.FindName("Sessions");
-            view = CollectionViewSource.GetDefaultView(Rows);
+            columnOrder = CurrentColumnOrder();
+            // Move changed rows without rebuilding the cells that own open tooltips.
+            view = new ListCollectionView(Rows) { IsLiveSorting = true };
             Grid.ItemsSource = view;
             Sort(Grid.Columns[2], ListSortDirection.Ascending);
             Grid.Sorting += delegate(object sender, DataGridSortingEventArgs e)
@@ -204,6 +207,7 @@ namespace CopilotSessions
             NotificationsEnabled = true;
             ShowLatestActivity = true;
             bool initialCompact = LoadPreferences();
+            ApplyColumnOrder();
             Backdrop = new WindowBackdrop(Window);
             Backdrop.Changed += delegate { UpdatePopupAppearance(); };
             Backdrop.Configure(Appearance, OpacityPercent);
@@ -211,6 +215,14 @@ namespace CopilotSessions
             UpdatePopupAppearance();
             ApplyInterfaceFont();
             SetCompact(initialCompact, false);
+            Grid.ColumnReordered += delegate
+            {
+                string[] proposed = CurrentColumnOrder();
+                if (SavePreferences(IsCompact, Appearance, OpacityPercent, InterfaceFontFamily,
+                                    InterfaceFontSize, NotificationsEnabled, ShowLatestActivity, proposed))
+                    columnOrder = proposed;
+                else ApplyColumnOrder();
+            };
             compact.Checked += delegate { SetCompact(true); };
             compact.Unchecked += delegate { SetCompact(false); };
             Window.Closed += delegate { closed = true; };
@@ -230,6 +242,7 @@ namespace CopilotSessions
                 int fontSize = DefaultInterfaceFontSize;
                 bool notifications = true;
                 bool showActivity = true;
+                string[] order = columnOrder;
                 if (values.ContainsKey("appearance"))
                 {
                     string mode = values["appearance"] as string;
@@ -269,6 +282,17 @@ namespace CopilotSessions
                         throw new ArgumentException("Expected a boolean show_latest_activity preference.");
                     showActivity = (bool)values["show_latest_activity"];
                 }
+                if (values.ContainsKey("column_order"))
+                {
+                    var items = values["column_order"] as System.Collections.IList;
+                    var requested = items == null ? null : items.Cast<object>().ToArray();
+                    if (requested == null || requested.Length == 0 ||
+                        requested.Any(value => !(value is string) || !columnOrder.Contains((string)value)) ||
+                        requested.Distinct().Count() != requested.Length)
+                        throw new ArgumentException("Expected column_order to contain distinct known column names.");
+                    order = requested.Cast<string>().Concat(columnOrder.Except(requested.Cast<string>())).ToArray();
+                }
+                columnOrder = order;
                 ShowLatestActivity = showActivity;
                 Appearance = appearance;
                 OpacityPercent = opacity;
@@ -282,6 +306,18 @@ namespace CopilotSessions
             catch (ArgumentException error) { settingsError = "Invalid preferences: " + error.Message; }
             catch (InvalidOperationException error) { settingsError = "Invalid preferences: " + error.Message; }
             return false;
+        }
+
+        private string[] CurrentColumnOrder()
+        {
+            return Grid.Columns.OrderBy(column => column.DisplayIndex)
+                .Select(column => column.SortMemberPath).ToArray();
+        }
+
+        private void ApplyColumnOrder()
+        {
+            for (int index = 0; index < columnOrder.Length; index++)
+                Grid.Columns.Single(column => column.SortMemberPath == columnOrder[index]).DisplayIndex = index;
         }
 
         private void InitializeAppearance()
@@ -581,7 +617,8 @@ namespace CopilotSessions
         }
 
         private bool SavePreferences(bool compact, AppearancePreference appearance, int opacity,
-                                     string fontFamily, int fontSize, bool notifications, bool? showActivity = null)
+                                     string fontFamily, int fontSize, bool notifications, bool? showActivity = null,
+                                     string[] orderedColumns = null)
         {
             try
             {
@@ -592,7 +629,8 @@ namespace CopilotSessions
                     File.WriteAllText(scratch, new JavaScriptSerializer().Serialize(
                         new { compact = compact, appearance = appearance.ToString().ToLowerInvariant(),
                               opacity = opacity, font_family = fontFamily, font_size = fontSize,
-                              notifications = notifications, show_latest_activity = showActivity ?? ShowLatestActivity }));
+                              notifications = notifications, show_latest_activity = showActivity ?? ShowLatestActivity,
+                              column_order = orderedColumns ?? columnOrder }));
                     if (File.Exists(preferencesPath)) File.Replace(scratch, preferencesPath, null);
                     else File.Move(scratch, preferencesPath);
                 }
@@ -729,8 +767,6 @@ namespace CopilotSessions
                         Notify(item.Value, SessionNotificationKind.NeedsInput);
                 }
             }
-            // Property updates can change a sort key without changing collection membership.
-            view.Refresh();
             if (selected != null && Rows.Contains(selected)) Grid.SelectedItem = selected;
             }
             finally { applying = false; }
@@ -753,7 +789,7 @@ namespace CopilotSessions
         private void UpdateDetail()
         {
             SessionRow row = Grid.SelectedItem as SessionRow;
-            string detail = row == null ? "Click a column to sort \u00B7 click again to reverse" :
+            string detail = row == null ? "Click a header to sort \u00B7 drag to reorder" :
                 row.Id + "  \u00B7  PID " + row.Pid + "  \u00B7  " + row.Cwd;
             Text("Detail", detail);
             Element("Detail").ToolTip = detail;
@@ -800,7 +836,6 @@ namespace CopilotSessions
         private void Disconnected(string error)
         {
             foreach (SessionRow row in Rows) row.MarkUnknown();
-            view.Refresh();
             Text("BusyCount", "0");
             Text("AttentionCount", "0");
             Text("DoneCount", "0");

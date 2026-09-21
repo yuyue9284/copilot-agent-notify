@@ -864,6 +864,22 @@ class WindowTests(unittest.TestCase):
                                     env=isolated_environment(directory), timeout=30)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_column_reordering(self):
+        with temporary_directory() as directory:
+            output = build_window(directory, "GadgetUiTests")
+            result = subprocess.run([str(output), "--column-reordering"],
+                                    capture_output=True, text=True,
+                                    env=isolated_environment(directory), timeout=30)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_activity_tooltip(self):
+        with temporary_directory() as directory:
+            output = build_window(directory, "GadgetUiTests")
+            result = subprocess.run([str(output), "--activity-tooltip"],
+                                    capture_output=True, text=True,
+                                    env=isolated_environment(directory), timeout=30)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_native_window_consumes_protocol_and_closes_on_eof(self):
         with temporary_directory() as directory:
             executable = build_window(directory)

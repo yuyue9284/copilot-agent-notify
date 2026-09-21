@@ -131,10 +131,15 @@ outlives its tool invocation may still be missed.
 | **Compact** | Switch to a smaller window with shorter rows |
 | **Always on top / Pin** | Keep the gadget above other windows |
 | **Appearance** gear | Choose appearance, font, size, opacity, and desktop notifications |
-| Column headers | Sort sessions; click again to reverse |
+| Column headers | Click to sort (click again to reverse); drag a header left/right to reorder columns |
+| Hover over Latest activity | Read the full activity text; routine updates keep the tooltip open |
 | Select a row | View its details and mark its completion read |
 | **Mark all read** | Clear unread completion badges |
 | **Forget** | Hide the selected session until new conversation activity |
+
+Column order is saved automatically and shared by the comfortable and compact
+layouts. Hidden columns keep their positions when shown again, including the
+optional Latest activity column. Drag a header's edge to resize rather than reorder.
 
 Unread completions are tracked only while the gadget is open. Sessions already
 done at startup do not generate retroactive completion notifications or badges.
