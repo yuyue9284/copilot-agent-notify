@@ -7,6 +7,13 @@ import { performance } from "node:perf_hooks";
 const TERMINAL = new Set(["completed", "failed", "cancelled"]);
 const GRACE_MS = 10_000;
 const ACTIVITY_TYPES = ["assistant.intent", "tool.execution_progress", "tool.execution_start"];
+const SUMMARY_HISTORY_LIMIT = 32;
+const SUMMARY_CACHE_LIMIT = 256;
+
+function activityText(value) {
+    return value.replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, " ")
+        .replace(/\s+/g, " ").trim().slice(0, 240).replace(/[\ud800-\udbff]$/, "");
+}
 
 export function snapshotPath(sessionId, home = process.env.COPILOT_HOME || join(homedir(), ".copilot")) {
     if (typeof sessionId !== "string" || !/^[a-zA-Z0-9-]+$/.test(sessionId)) {
@@ -68,9 +75,45 @@ export function createBridge(session, {
     let lastError = null;
     let latestActivity = "";
     let latestActivityTime = -Infinity;
+    let latestToolCall = null;
+    let lastSummaryLookup = null;
+    const toolSummaries = new Map();
+
+    function suppliedSummary(toolCallId, toolName) {
+        const cached = toolSummaries.get(toolCallId);
+        return cached && cached.name === toolName ? cached.summary : undefined;
+    }
 
     function updateActivity(event, history = false) {
         if (event.agentId && event.agentId !== sessionId) return;
+        if (!ACTIVITY_TYPES.includes(event.type) && event.type !== "assistant.message") return;
+        const timestamp = typeof event.timestamp === "string" ? Date.parse(event.timestamp) : NaN;
+        if (history && !Number.isFinite(timestamp)) throw new Error("Invalid activity timestamp.");
+        const time = Number.isFinite(timestamp) ? timestamp : now();
+        if (event.type === "assistant.message") {
+            const requests = event.data?.toolRequests;
+            if (requests === undefined) return;
+            if (!Array.isArray(requests) || requests.some(request =>
+                !request || typeof request.toolCallId !== "string" || !request.toolCallId
+                || typeof request.name !== "string" || !request.name
+                || (request.intentionSummary != null && typeof request.intentionSummary !== "string"))) {
+                throw new Error("Invalid tool summaries.");
+            }
+            for (const request of requests) {
+                const summary = activityText(request.intentionSummary ?? "");
+                if (!summary) continue;
+                toolSummaries.delete(request.toolCallId);
+                toolSummaries.set(request.toolCallId, { name: request.name, summary });
+                if (toolSummaries.size > SUMMARY_CACHE_LIMIT)
+                    toolSummaries.delete(toolSummaries.keys().next().value);
+            }
+            // Metadata can arrive after execution starts, but must not replace later progress/intent.
+            if (latestToolCall) {
+                const summary = suppliedSummary(latestToolCall.id, latestToolCall.name);
+                if (summary) latestActivity = summary;
+            }
+            return;
+        }
         let activity;
         if (event.type === "assistant.intent") {
             if (typeof event.data?.intent !== "string") throw new Error("Invalid assistant intent.");
@@ -79,20 +122,34 @@ export function createBridge(session, {
             if (typeof event.data?.progressMessage !== "string") throw new Error("Invalid tool progress.");
             activity = event.data.progressMessage;
         } else if (event.type === "tool.execution_start") {
+            const summary = suppliedSummary(event.data?.toolCallId, event.data?.toolName);
             const description = event.data?.arguments?.description;
-            if (typeof description === "string" && description.trim()) activity = description;
+            if (summary) activity = summary;
+            else if (typeof description === "string" && description.trim()) activity = description;
             else if (typeof event.data?.toolName === "string") activity = `Using ${event.data.toolName}`;
             else throw new Error("Invalid tool start.");
         }
         if (activity === undefined) return;
-        const timestamp = typeof event.timestamp === "string" ? Date.parse(event.timestamp) : NaN;
-        if (history && !Number.isFinite(timestamp)) throw new Error("Invalid activity timestamp.");
-        const time = Number.isFinite(timestamp) ? timestamp : now();
         // A persisted tool start must not overwrite a newer live intent/progress event.
         if (time < latestActivityTime) return;
         latestActivityTime = time;
-        latestActivity = activity.replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, " ")
-            .replace(/\s+/g, " ").trim().slice(0, 240).replace(/[\ud800-\udbff]$/, "");
+        latestActivity = activityText(activity);
+        latestToolCall = event.type === "tool.execution_start"
+            ? { id: event.data.toolCallId, name: event.data.toolName } : null;
+    }
+
+    async function readHistory(types, max) {
+        const history = await session.rpc.eventLog.read({
+            direction: "backward", max, types,
+            agentScope: "primary", includeEphemeral: false,
+        });
+        if (!history || !Array.isArray(history.events) || history.events.length > max
+                || history.cursorStatus !== "ok" || typeof history.cursor !== "string"
+                || typeof history.hasMore !== "boolean"
+                || history.events.some(event => !event || !types.includes(event.type))) {
+            throw new Error("Invalid SDK activity history.");
+        }
+        return history.events;
     }
 
     async function emit(state, count = 0, settling = false) {
@@ -126,18 +183,22 @@ export function createBridge(session, {
                     count = pendingShells(await session.rpc.tasks.list());
                     if (closed) return;
                     failureState = "activity_query_failed";
-                    const history = await session.rpc.eventLog.read({
-                        direction: "backward", max: 1, types: ACTIVITY_TYPES,
-                        agentScope: "primary", includeEphemeral: false,
-                    });
-                    if (!history || !Array.isArray(history.events) || history.events.length > 1
-                            || history.cursorStatus !== "ok" || typeof history.cursor !== "string"
-                            || typeof history.hasMore !== "boolean"
-                            || history.events.some(event => !event || !ACTIVITY_TYPES.includes(event.type))) {
-                        throw new Error("Invalid SDK activity history.");
+                    const [activity] = await readHistory(ACTIVITY_TYPES, 1);
+                    let messages;
+                    const callId = activity?.data?.toolCallId;
+                    if (!closed && observed === revision && activity?.type === "tool.execution_start"
+                            && (!activity.agentId || activity.agentId === sessionId)
+                            && Date.parse(activity.timestamp) >= latestActivityTime
+                            && typeof callId === "string" && callId && callId !== lastSummaryLookup
+                            && !suppliedSummary(callId, activity.data.toolName)) {
+                        messages = await readHistory(["assistant.message"], SUMMARY_HISTORY_LIMIT);
                     }
-                    if (!closed && observed === revision && history.events.length) {
-                        updateActivity(history.events[0], true);
+                    if (!closed && observed === revision) {
+                        if (messages) {
+                            for (const message of messages) updateActivity(message, true);
+                            lastSummaryLookup = callId;
+                        }
+                        if (activity) updateActivity(activity, true);
                     }
                 } while (!closed && observed !== revision);
             } catch {
@@ -180,7 +241,7 @@ export function createBridge(session, {
         }
         if (["session.background_tasks_changed", "system.notification",
              "tool.execution_start", "tool.execution_progress", "tool.execution_complete",
-             "assistant.turn_start", "session.idle", "assistant.intent"].includes(event.type)) {
+             "assistant.turn_start", "session.idle", "assistant.intent", "assistant.message"].includes(event.type)) {
             revision++;
             if (!refreshTimer) {
                 refreshTimer = setTimeout(() => {

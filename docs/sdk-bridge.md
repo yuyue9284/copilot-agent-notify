@@ -47,6 +47,10 @@ refresh. Events within 50 milliseconds are coalesced; a five-second timer provid
 reconciliation and freshness heartbeats. Each refresh also reads the newest
 persisted main-agent activity through SDK `session.rpc.eventLog.read`
 (`direction: backward`, `max: 1`, activity-type filter, `agentScope: primary`).
+For a tool start without a cached supplied summary, it also checks the newest
+32 persisted primary-agent `assistant.message` events for a matching
+`toolRequests[].toolCallId` and tool name. This lookup runs once per newly
+observed tool-call ID; missing summaries retain the normal fallback.
 This restores activity after reload and updates it even when a host does not
 deliver live event callbacks. Windows and WSL use the same path, including CLI
 sessions launched from VS Code terminals. Newer live intent/progress events take
@@ -91,8 +95,16 @@ COPILOT_HOME/session-state/SESSION_ID/gadget-sdk.json
 
 The optional `latest_activity` field carries the most recently received
 main-agent activity: `assistant.intent`, `tool.execution_progress` messages, or
-the short `arguments.description` from a tool-start event. Tool starts without
-a description show `Using <tool name>`, never raw commands or file arguments.
+tool-start activity. Tool starts first reuse the supplied
+`assistant.message.data.toolRequests[].intentionSummary`, matched by
+`toolCallId` and tool name. If no nonempty summary is available, they keep the
+existing fallback: `arguments.description`, then `Using <tool name>`.
+There is no handcrafted wording, tool-title substitution, or formatting of raw
+commands/file arguments. Assistant message bodies are never copied into activity.
+The bridge caches at most 256 normalized supplied summaries. A late summary can
+enrich its matching latest tool start, but cannot replace a newer intent,
+progress message, or different tool call. A request alone does not count as a
+started tool.
 The latest of these events wins. Text is normalized to one line and limited to
 240 UTF-16 code units by the bridge. Child activity is ignored. Text is retained
 across assistant turns (including thinking between tool calls) and after completion
@@ -110,8 +122,9 @@ with **Appearance > Show latest activity**. This preference persists in
 remain blank. Activity text is not included in desktop notification bodies.
 
 Commands, raw tool output, prompts, and shell IDs are not copied
-directly into this file, but activity descriptions may themselves contain private task details
-or paths. Review it before sharing snapshots or screenshots.
+directly into this file, but supplied summaries and activity descriptions may
+themselves contain private task details or paths. Review it before sharing
+snapshots or screenshots.
 Error states use fixed labels rather than raw RPC errors.
 The file remains local and must not be committed or included in public reports.
 
@@ -190,7 +203,8 @@ PYTHONPATH=tests python3 -m unittest test_activity test_session_gadget test_oute
 ```
 
 The Node tests use an injected SDK-shaped session, not real Copilot sessions.
-They cover task-schema validation, event refreshes, metadata minimization,
+They cover supplied-summary correlation, bounded history recovery and caching,
+unchanged fallbacks, task-schema validation, event refreshes, metadata minimization,
 completion grace, root resumption, query failure, hung-query shutdown, and
 atomic file replacement. Python tests cover consumption, freshness, ownership,
 attention precedence, automatic/legacy selection, bridge disappearance/recovery,
