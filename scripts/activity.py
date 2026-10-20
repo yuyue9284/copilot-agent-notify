@@ -17,6 +17,8 @@ import time
 import uuid
 
 from outer_progress import OuterProgress
+from session_discovery import DiscoveryIndex
+from transcript_stream import read_record
 
 
 LOG = logging.getLogger("copilot-notify-icons")
@@ -317,13 +319,30 @@ def owner_alive(record):
     return process_token(record["pid"]) == record["token"]
 
 
+def closed_sessions(directory):
+    records = read_json(directory / "closed-sessions.json", {})
+    if not isinstance(records, dict) or any(
+            not isinstance(record, dict) or type(record.get("pid")) is not int
+            or record["pid"] <= 0 or not isinstance(record.get("token"), str)
+            or not isinstance(record.get("transcript"), str)
+            for record in records.values()):
+        raise ValueError("invalid closed-session registry")
+    return records
+
+
 class SiblingSessions:
     """Discover hookless roots only within an already registered CLI/pane scope."""
 
     def __init__(self):
         self.seen = {}
+        self.indexes = {}
 
-    def discover(self, records):
+    def close(self):
+        for index in self.indexes.values():
+            index.close()
+        self.indexes.clear()
+
+    def discover(self, records, closed=None):
         if os.name != "nt" and not sys.platform.startswith("linux"):
             return {}
         groups = collections.defaultdict(set)
@@ -333,15 +352,31 @@ class SiblingSessions:
                 groups[(root, record["pid"], record["token"])].add(record["pane_id"])
         found = {}
         seen = {}
+        excluded = {(record["transcript"], record["pid"], record["token"])
+                    for record in (closed or {}).values()}
+        roots = {root for root, _, _ in groups}
+        for root in set(self.indexes) - roots:
+            self.indexes.pop(root).close()
         for (root, pid, token), panes in groups.items():
             born = started_at(token)
-            for lock in root.glob("*/inuse.%d.lock" % pid):
+            if root not in self.indexes:
+                self.indexes[root] = DiscoveryIndex(root)
+            index = self.indexes[root]
+            previous_error = index.error
+            locks = index.locks()
+            if index.error and index.error != previous_error:
+                LOG.warning("%s", index.error)
+            for lock in locks:
+                if lock.name != "inuse.%d.lock" % pid:
+                    continue
                 if lock.parent.is_symlink():
                     continue
                 path = lock.parent / "events.jsonl"
                 session_id = lock.parent.name
                 key = hashlib.sha256(session_id.encode()).hexdigest()
                 identity = (str(path), pid, token)
+                if identity in excluded:
+                    continue
                 try:
                     lock_stat, stat = lock.stat(), path.stat()
                     fingerprint = (lock_stat.st_dev, lock_stat.st_ino, lock_stat.st_mtime_ns,
@@ -357,12 +392,10 @@ class SiblingSessions:
                         LOG.warning("sibling discovery cannot assign a CLI registered in multiple panes")
                         continue
                     with path.open("rb") as stream:
-                        line = stream.readline(65536)
-                    if not line.endswith(b"\n"):
-                        if len(line) == 65536:
-                            LOG.warning("sibling discovery transcript header exceeds its size limit")
+                        record = read_record(stream)
+                    if record is None:
                         continue
-                    header = json.loads(line)
+                    header = record[1]
                     if (not isinstance(header, dict) or header.get("type") != "session.start"
                             or header.get("agentId") or not isinstance(header.get("data"), dict)
                             or header["data"].get("sessionId") != session_id):
@@ -445,6 +478,7 @@ class Activity:
         elif kind == "user.message" and root:
             # Queued/background deliveries are not the start of a new root request.
             if data.get("delivery") == "idle" and data.get("source") in (None, "", "user"):
+                self.shutdown = False
                 self.root_busy = True
                 self.final = self.stopped = False
                 self.final_turn = None
@@ -453,6 +487,8 @@ class Activity:
         elif kind == "assistant.turn_start":
             self.resume_actor(actor)
             if root:
+                # Continued sessions do not always emit session.resume.
+                self.shutdown = False
                 self.root_busy = True
                 self.final = self.stopped = False
                 self.final_turn = None
@@ -522,6 +558,8 @@ class Activity:
             if data.get("success") is False:
                 LOG.warning("child agentStop hook failed for session %s", child)
         elif kind == "tool.execution_start":
+            if root:
+                self.shutdown = False
             tool_id = data.get("toolCallId")
             self.tools.setdefault(actor, set()).add(tool_id)
             if data.get("toolName", "").split(".")[-1] == "ask_user":
@@ -575,25 +613,31 @@ class Transcript:
                 self.anchor = b""
                 self.state.reset()
                 self.validated = False
+                self.malformed = False
                 self.identity = identity
                 self.new_shutdown = False
             stream.seek(self.offset)
             start = self.offset
             caught_up = True
             while True:
-                line = stream.readline()
-                if not line or not line.endswith(b"\n"):
-                    break
-                self.offset = stream.tell()
                 try:
-                    event = json.loads(line)
+                    record = read_record(stream, self.offset)
+                    if record is not None:
+                        event = record[1]
+                        if not isinstance(event, dict) or not isinstance(event.get("data", {}), dict):
+                            raise ValueError("invalid transcript event shape")
                 except (ValueError, UnicodeDecodeError):
+                    self.offset = stream.tell()
                     if not self.malformed:
                         LOG.warning("malformed transcript record: %s", self.path)
                         self.malformed = True
+                    if self.offset - start >= budget:
+                        caught_up = self.offset >= stat.st_size
+                        break
                     continue
-                if not isinstance(event, dict) or not isinstance(event.get("data", {}), dict):
-                    raise ValueError("invalid transcript event shape")
+                if record is None:
+                    break
+                self.offset, event = record
                 if not self.validated:
                     if event.get("type") != "session.start":
                         raise ValueError("transcript does not begin with session.start")
@@ -628,13 +672,49 @@ class Zellij:
             raise RuntimeError("zellij %s failed: %s" % (args[0], result.stderr.strip()[:500]))
         return result.stdout
 
-    def snapshot(self):
+    def snapshot(self, required_tabs=()):
         panes = json.loads(self.action("list-panes", "--json"))
-        tabs = json.loads(self.action("list-tabs", "--json"))
-        if not isinstance(panes, list) or not isinstance(tabs, list):
-            raise ValueError("Zellij JSON listing requires a supported Zellij version")
-        return ({str(p["id"]): p for p in panes if not p["is_plugin"] and not p["exited"]},
-                {str(t["tab_id"]): t for t in tabs})
+        if not isinstance(panes, list):
+            raise ValueError("Invalid Zellij pane listing")
+        tabs = {}
+        seen = set()
+        complete = bool(panes)
+        for pane in panes:
+            if (not isinstance(pane, dict) or type(pane.get("id")) is not int
+                    or type(pane.get("tab_id")) is not int
+                    or type(pane.get("is_plugin")) is not bool
+                    or type(pane.get("exited")) is not bool
+                    or not isinstance(pane.get("title"), str)):
+                raise ValueError("Invalid Zellij pane metadata")
+            key = (pane["is_plugin"], pane["id"])
+            if key in seen:
+                raise ValueError("Duplicate Zellij pane identity")
+            seen.add(key)
+            if "tab_name" not in pane:
+                complete = False
+                continue
+            if not isinstance(pane["tab_name"], str):
+                raise ValueError("Invalid Zellij tab name")
+            tab_id = str(pane["tab_id"])
+            if tab_id in tabs and tabs[tab_id]["name"] != pane["tab_name"]:
+                raise ValueError("Inconsistent Zellij tab names")
+            tabs[tab_id] = {"tab_id": pane["tab_id"], "name": pane["tab_name"]}
+        if not complete or set(required_tabs) - tabs.keys():
+            listing = json.loads(self.action("list-tabs", "--json"))
+            if not isinstance(listing, list):
+                raise ValueError("Invalid Zellij tab listing")
+            fallback = {}
+            for tab in listing:
+                if (not isinstance(tab, dict) or type(tab.get("tab_id")) is not int
+                        or not isinstance(tab.get("name"), str)
+                        or str(tab["tab_id"]) in fallback):
+                    raise ValueError("Invalid or duplicate Zellij tab metadata")
+                fallback[str(tab["tab_id"])] = tab
+            if any(key not in fallback or fallback[key]["name"] != tab["name"]
+                   for key, tab in tabs.items()):
+                raise ValueError("Zellij tab changed during metadata queries; retry")
+            tabs = fallback
+        return ({str(p["id"]): p for p in panes if not p["is_plugin"] and not p["exited"]}, tabs)
 
     def rename(self, kind, item_id, title):
         if kind == "pane":
@@ -771,18 +851,26 @@ def run_worker(directory, session, binary):
             try:
                 with Lock(directory / "registry.lock"):
                     records = read_json(directory / "registrations.json", {})
+                    closed = closed_sessions(directory)
+                    previous_records = records.copy()
                     for key, record in list(records.items()):
                         lock = Path(record["transcript"]).parent / ("inuse.%d.lock" % record["pid"])
-                        if not owner_alive(record) or (record.get("discovered") and not lock.exists()):
+                        ended = closed.get(key)
+                        if (not owner_alive(record)
+                                or (ended and all(ended.get(field) == record[field]
+                                                  for field in ("pid", "token", "transcript")))
+                                or (record.get("discovered") and not lock.exists())):
                             del records[key]
                     if time.monotonic() >= next_sibling_discovery:
-                        records.update(siblings.discover(records))
+                        records.update(siblings.discover(records, closed))
                         next_sibling_discovery = time.monotonic() + 5
-                    atomic_json(directory / "registrations.json", records)
+                    if records != previous_records:
+                        atomic_json(directory / "registrations.json", records)
                     if not records:
                         cleanup_error = None
                         try:
-                            panes, tabs = zellij.snapshot()
+                            panes, tabs = zellij.snapshot(
+                                key[4:] for key in titles.owned if key.startswith("tab:"))
                             titles.update(panes, tabs, {})
                         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
                             cleanup_error = str(error)
@@ -795,7 +883,8 @@ def run_worker(directory, session, binary):
                         writer.release()
                         LOG.info("coordinator stopped: no live registrations")
                         return 1 if cleanup_error or outer_error else 0
-                panes, tabs = zellij.snapshot()
+                panes, tabs = zellij.snapshot(
+                    key[4:] for key in titles.owned if key.startswith("tab:"))
                 provider.refresh()
                 ready = {}
                 obsolete = {}
@@ -821,7 +910,12 @@ def run_worker(directory, session, binary):
                         LOG.warning("discard registration %s: transcript unavailable after startup grace", key)
                         obsolete[key] = record
                         continue
-                    if caught_up:
+                    if reader.malformed:
+                        reader.status_error = "%s: malformed transcript records" % record["session_id"]
+                        status_errors.append(reader.status_error)
+                        reader.display_counts = (reader.display_counts[0], 1)
+                        ready[key] = record
+                    elif caught_up:
                         if reader.state.shutdown and reader.new_shutdown:
                             obsolete[key] = record
                         else:
@@ -886,6 +980,7 @@ def run_worker(directory, session, binary):
         LOG.exception("coordinator terminated unexpectedly")
         raise
     finally:
+        siblings.close()
         writer.release()
 
 
@@ -908,9 +1003,9 @@ def hook(event, payload):
     transcript = Path(payload.get("transcriptPath") or home / "session-state" / session_id / "events.jsonl")
     try:
         with transcript.open("rb") as stream:
-            line = stream.readline()
-        if line.endswith(b"\n"):
-            header = json.loads(line)
+            record = read_record(stream)
+        if record is not None:
+            header = record[1]
             if header.get("type") != "session.start":
                 raise ValueError("invalid transcript session header")
             if header.get("data", {}).get("sessionId") != session_id:
@@ -932,16 +1027,29 @@ def hook(event, payload):
                   transcript=str(transcript.resolve()), created=time.time())
     with Lock(directory / "registry.lock"):
         records = read_json(directory / "registrations.json", {})
+        previous_closed = closed_sessions(directory)
+        tokens = {}
+        for ended in previous_closed.values():
+            if ended["pid"] not in tokens:
+                tokens[ended["pid"]] = process_token(ended["pid"])
+        closed = {key: ended for key, ended in previous_closed.items()
+                  if tokens[ended["pid"]] == ended["token"]}
         if event == "sessionEnd":
             previous = records.get(key)
             if previous and all(previous.get(k) == owner[k] for k in ("pid", "token")):
+                closed[key] = {field: previous[field] for field in ("pid", "token", "transcript")}
                 del records[key]
         else:
+            closed.pop(key, None)
             previous = records.get(key)
             if previous and all(previous.get(k) == owner[k] for k in ("pid", "token")):
                 record["created"] = previous["created"]
                 record["start_offset"] = previous["start_offset"]
             records[key] = record
+        if closed != previous_closed:
+            # Persist the close before removing its registration, including across
+            # a crash between the two writes.
+            atomic_json(directory / "closed-sessions.json", closed)
         atomic_json(directory / "registrations.json", records)
     command = [sys.executable, str(Path(__file__).resolve()), "worker",
                "--directory", str(directory.resolve()), "--session", session, "--zellij", binary]

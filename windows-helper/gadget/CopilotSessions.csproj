@@ -35,7 +35,7 @@
     <None Include="app.config" />
     <None Include="app.manifest" />
     <None Include="sessions.ico" />
-    <Content Include="..\..\scripts\session_probe.py;..\..\scripts\activity.py;..\..\scripts\outer_progress.py">
+    <Content Include="..\..\scripts\session_probe.py;..\..\scripts\activity.py;..\..\scripts\outer_progress.py;..\..\scripts\session_discovery.py;..\..\scripts\transcript_stream.py">
       <Link>%(Filename)%(Extension)</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>

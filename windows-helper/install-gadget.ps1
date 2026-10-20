@@ -4,6 +4,7 @@ $ErrorActionPreference = "Stop"
 $source = Join-Path $PSScriptRoot "gadget\bin\Release"
 $files = @("CopilotSessions.exe", "CopilotSessions.exe.config",
            "session_probe.py", "activity.py", "outer_progress.py",
+           "session_discovery.py", "transcript_stream.py",
            "copilot-notify.exe")
 foreach ($name in $files) {
     if (-not (Test-Path -LiteralPath (Join-Path $source $name))) {

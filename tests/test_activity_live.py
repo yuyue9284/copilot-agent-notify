@@ -21,15 +21,17 @@ class LiveZellijTests(Files):
         binary = shutil.which("zellij")
         self.assertIsNotNone(binary, "Zellij is required for this opt-in test")
         session = "cni-" + uuid.uuid4().hex[:12]
+        runtime = self.directory
         env = dict(os.environ, ZELLIJ_SESSION_NAME=session, COPILOT_NOTIFY_ICONS="1",
-                   COPILOT_NOTIFY_STATE_DIR=str(self.directory / "cache"),
-                   COPILOT_HOME=str(self.directory / "home"), COPILOT_NOTIFY_ZELLIJ=binary)
+                   COPILOT_NOTIFY_STATE_DIR=str(runtime / "cache"),
+                   COPILOT_HOME=str(runtime / "home"), COPILOT_NOTIFY_ZELLIJ=binary)
         env.pop("ZELLIJ", None)
         env.pop("ZELLIJ_PANE_ID", None)
         api = activity.Zellij(binary, session)
         with patch.dict(os.environ, env):
             cache = activity.state_directory(session)
         created = False
+        console = None
 
         def wait_for(condition, description):
             deadline = time.monotonic() + 20
@@ -64,16 +66,21 @@ class LiveZellijTests(Files):
 
         try:
             launch_env = {k: v for k, v in env.items() if k != "ZELLIJ_SESSION_NAME"}
-            result = subprocess.run([binary, "attach", "--create-background", session],
-                                    env=launch_env, capture_output=True, encoding="utf-8", timeout=25)
-            self.assertEqual(result.returncode, 0, result.stderr)
+            if os.name == "nt":
+                console = subprocess.Popen(
+                    [binary, "--session", session], env=launch_env, cwd=runtime,
+                    creationflags=subprocess.CREATE_NEW_CONSOLE)
+            else:
+                result = subprocess.run([binary, "attach", "--create-background", session],
+                                        env=launch_env, capture_output=True, encoding="utf-8", timeout=25)
+                self.assertEqual(result.returncode, 0, result.stderr)
             created = True
             deadline = time.monotonic() + 15
             while True:
                 try:
                     panes, tabs = api.snapshot()
                     break
-                except RuntimeError:
+                except (RuntimeError, ValueError):
                     if time.monotonic() >= deadline:
                         raise
                     time.sleep(0.25)
@@ -81,7 +88,8 @@ class LiveZellijTests(Files):
             api.rename("tab", tab, "work")
             pane_a = next(k for k, v in panes.items() if str(v["tab_id"]) == tab)
             api.rename("pane", pane_a, "A")
-            pane_b = api.action("new-pane", "--tab-id", tab, "--name", "B").strip()
+            api.action("go-to-tab-name", "work")
+            pane_b = api.action("new-pane", "--name", "B").strip()
             pane_b = pane_b.removeprefix("terminal_")
             other = api.action("new-tab", "--name", "other").strip()
             panes, tabs = api.snapshot()
@@ -146,17 +154,28 @@ class LiveZellijTests(Files):
             self.assertIsNone(activity.process_token(writer))
             print("LIVE: dead-owner cleanup restores names and coordinator exits")
         finally:
-            if cache.exists():
-                with activity.Lock(cache / "registry.lock"):
-                    activity.atomic_json(cache / "registrations.json", {})
-                status = activity.read_json(cache / "status.json", {})
-                deadline = time.monotonic() + 15
-                while status.get("token") and activity.owner_alive(status) and time.monotonic() < deadline:
-                    time.sleep(0.1)
-            if created:
-                result = subprocess.run([binary, "delete-session", "--force", session], env=env,
-                                        capture_output=True, encoding="utf-8", timeout=15)
-                self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+            try:
+                if cache.exists():
+                    with activity.Lock(cache / "registry.lock"):
+                        activity.atomic_json(cache / "registrations.json", {})
+                    status = activity.read_json(cache / "status.json", {})
+                    deadline = time.monotonic() + 15
+                    while (status.get("token") and activity.owner_alive(status)
+                           and time.monotonic() < deadline):
+                        time.sleep(0.1)
+            finally:
+                try:
+                    if created:
+                        result = subprocess.run([binary, "delete-session", "--force", session], env=env,
+                                                capture_output=True, encoding="utf-8", timeout=15)
+                        self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+                finally:
+                    if console is not None:
+                        try:
+                            console.wait(timeout=10)
+                        except subprocess.TimeoutExpired:
+                            console.terminate()
+                            console.wait(timeout=10)
 
 
 if __name__ == "__main__":

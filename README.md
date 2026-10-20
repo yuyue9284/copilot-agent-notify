@@ -115,6 +115,12 @@ are discovered about every ten seconds. Large session histories may take
 several refreshes to load. Activity that starts and ends entirely between polls
 may not be observed.
 
+Collectors index session-directory changes rather than repeatedly walking
+archived sessions, with a complete-scan fallback when notifications are unavailable.
+Oversized prompt/result records are streamed without a record-size rejection
+limit; this bounds payload memory but can make very large records slower to read.
+See [resource behavior and benchmarks](docs/reference.md#resource-behavior-and-benchmarks).
+
 Status selection is automatic: sessions use transcript tracking, supplemented
 by structured background-shell status when the optional
 [SDK bridge prototype](docs/sdk-bridge.md) is running. No backend choice is

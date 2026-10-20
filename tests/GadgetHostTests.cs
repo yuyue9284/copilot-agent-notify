@@ -287,7 +287,7 @@ public static class GadgetHostTests
         Directory.CreateDirectory(directory);
         try
         {
-            foreach (string name in new[] { "outer_progress.py", "activity.py", "session_probe.py" })
+            foreach (string name in new[] { "session_discovery.py", "transcript_stream.py", "outer_progress.py", "activity.py", "session_probe.py" })
                 File.WriteAllText(Path.Combine(directory, name), "# synthetic \u03bb\n");
             foreach (string name in new[] { "python.exe", "py.exe", "wsl.exe" })
                 File.WriteAllText(Path.Combine(directory, name), "synthetic nonexecuted launcher fixture");
@@ -405,6 +405,8 @@ public static class GadgetHostTests
     {
         var sources = new Dictionary<string, string>
         {
+            { "session_discovery", "" },
+            { "transcript_stream", "" },
             { "outer_progress", "marker = '\\u03bb'\n" },
             { "activity", "" },
             { "session_probe", "import sys, outer_progress\n" +

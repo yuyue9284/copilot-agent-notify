@@ -13,7 +13,9 @@ args = sys.argv[1:]
 assert args[:3] == ["--session", os.environ["ZELLIJ_SESSION_NAME"], "action"], args
 action = args[3]
 if action == "list-panes":
-    print(json.dumps(state["panes"]))
+    print(json.dumps([dict(pane, tab_name=next(
+        tab["name"] for tab in state["tabs"] if tab["tab_id"] == pane["tab_id"]))
+        for pane in state["panes"]]))
 elif action == "list-tabs":
     print(json.dumps(state["tabs"]))
 elif action in ("rename-pane", "rename-tab-by-id"):
@@ -24,12 +26,16 @@ elif action in ("rename-pane", "rename-tab-by-id"):
     else:
         item_id = int(args[4])
         next(t for t in state["tabs"] if t["tab_id"] == item_id)["name"] = args[5]
-    scratch = path.with_suffix(".write")
-    scratch.write_text(json.dumps(state), encoding="utf-8")
-    os.replace(scratch, path)
-    writer = os.getppid()
     if os.name == "nt":
         sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+        from activity import atomic_json
+        atomic_json(path, state)
+    else:
+        scratch = path.with_suffix(".write")
+        scratch.write_text(json.dumps(state), encoding="utf-8")
+        os.replace(scratch, path)
+    writer = os.getppid()
+    if os.name == "nt":
         from activity import process_table
         writer = process_table()[writer][0]  # The fake .cmd launcher's parent.
     with path.with_suffix(".actions").open("a", encoding="utf-8") as stream:

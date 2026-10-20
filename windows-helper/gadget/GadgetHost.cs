@@ -272,7 +272,7 @@ namespace CopilotSessions
         // Framework stdin may prefix its ASCII-compatible JSON with a UTF-8 BOM.
         public const string Bootstrap = "import json, sys, types\n" +
             "sources = json.loads(sys.stdin.readline().lstrip('\\ufeff'))\n" +
-            "for name in ('outer_progress', 'activity', 'session_probe'):\n" +
+            "for name in ('session_discovery', 'transcript_stream', 'outer_progress', 'activity', 'session_probe'):\n" +
             "    module = types.ModuleType(name)\n" +
             "    module.__file__ = name + '.py'\n" +
             "    sys.modules[name] = module\n" +
@@ -367,7 +367,7 @@ namespace CopilotSessions
             }, delegate
             {
                 var sources = new Dictionary<string, string>();
-                foreach (string name in new[] { "outer_progress", "activity", "session_probe" })
+                foreach (string name in new[] { "session_discovery", "transcript_stream", "outer_progress", "activity", "session_probe" })
                     sources.Add(name, File.ReadAllText(Path.Combine(directory, name + ".py")));
                 string json = new JavaScriptSerializer { MaxJsonLength = SnapshotProtocol.MaxLineLength }.Serialize(sources);
                 // ASCII JSON preserves every source character under legacy console codepages.

@@ -9,10 +9,10 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "windows-helper" / "gadget"
-COLLECTORS = ("outer_progress", "activity", "session_probe")
+COLLECTORS = ("session_discovery", "transcript_stream", "outer_progress", "activity", "session_probe")
 BOOTSTRAP = """import json, sys, types
 sources = json.loads(sys.stdin.readline())
-for name in ('outer_progress', 'activity', 'session_probe'):
+for name in ('session_discovery', 'transcript_stream', 'outer_progress', 'activity', 'session_probe'):
     module = types.ModuleType(name)
     module.__file__ = name + '.py'
     sys.modules[name] = module

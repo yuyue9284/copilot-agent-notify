@@ -14,6 +14,8 @@ import time
 
 from activity import (Activity, BridgeStarting, StatusProvider, Transcript, atomic_json,
                       process_token, read_json, started_at, state_directory)
+from session_discovery import DiscoveryIndex
+from transcript_stream import read_record
 
 
 BACKGROUND_COMPLETION_GRACE_SECONDS = 10
@@ -64,8 +66,11 @@ class ActivityRevision(Activity):
                 moment = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
                 if moment.tzinfo is not None:
                     stamp = int((moment - datetime(1970, 1, 1, tzinfo=timezone.utc)).total_seconds() * 1000000)
-            digest = hashlib.sha256(
-                json.dumps(event, sort_keys=True, ensure_ascii=True).encode("utf-8")).hexdigest()
+            if hasattr(event, "canonical_digest"):
+                digest = event.canonical_digest()
+            else:
+                digest = hashlib.sha256(
+                    json.dumps(event, sort_keys=True, ensure_ascii=True).encode("utf-8")).hexdigest()
             self.activity_revision = "%020d/%s" % (stamp, digest)
 
 
@@ -104,6 +109,10 @@ class Scanner:
         self.identity_path = self.cache_root / "gadget-owners" / (scope + ".json")
         self.identities = {}
         self.identity_save_pending = False
+        self.discovery = DiscoveryIndex(self.home / "session-state")
+
+    def close(self):
+        self.discovery.close()
 
     def registered_owners(self, errors):
         owners = set()
@@ -155,10 +164,12 @@ class Scanner:
         cached = self.cached_owners(errors)
         retained = {}
         registered = None
-        state = self.home / "session-state"
         # A CLI can own several root sessions concurrently. Locks establish
         # liveness, not session identity; only deduplicate owners of the same root.
-        for lock in state.glob("*/inuse.*.lock"):
+        locks = self.discovery.locks()
+        if self.discovery.error:
+            errors.append(self.discovery.error)
+        for lock in locks:
             try:
                 pid = int(lock.name.split(".")[1])
                 stat = lock.stat()
@@ -219,8 +230,12 @@ class Scanner:
                 reader = self.readers.get(key)
                 if reader is None:
                     path = directory / "events.jsonl"
-                    with path.open(encoding="utf-8") as stream:
-                        header = json.loads(stream.readline())
+                    with path.open("rb") as stream:
+                        record = read_record(stream)
+                    if record is None:
+                        sessions.append(row)
+                        continue
+                    header = record[1]
                     if (header.get("type") != "session.start"
                             or header.get("data", {}).get("sessionId") != session_id):
                         raise ValueError("not a root session transcript")
@@ -307,6 +322,7 @@ def watch():
             stopped.set()
 
     try:
+        scanner = None
         try:
             descriptor = sys.stdin.fileno()
             scanner = Scanner()
@@ -330,6 +346,9 @@ def watch():
             return 0
         print("Collector pipe failure: " + str(error), file=sys.stderr)
         return 1
+    finally:
+        if scanner is not None:
+            scanner.close()
 
 
 def main():
@@ -339,7 +358,11 @@ def main():
     args = parser.parse_args()
     if args.watch:
         return watch()
-    print(json.dumps(Scanner().snapshot(), ensure_ascii=True))
+    scanner = Scanner()
+    try:
+        print(json.dumps(scanner.snapshot(), ensure_ascii=True))
+    finally:
+        scanner.close()
     return 0
 
 

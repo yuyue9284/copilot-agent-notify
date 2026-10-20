@@ -7,6 +7,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
 from unittest.mock import patch
@@ -46,11 +47,19 @@ def finish(session="root", invocation="stop"):
 
 class Files(unittest.TestCase):
     def setUp(self):
-        self.directory = ROOT / "tests" / (".runtime-" + uuid.uuid4().hex)
-        self.directory.mkdir()
+        self.temporary = None
+        if os.name == "nt":
+            self.temporary = tempfile.TemporaryDirectory(prefix="notify-test-")
+            self.directory = Path(self.temporary.name)
+        else:
+            self.directory = ROOT / "tests" / (".runtime-" + uuid.uuid4().hex)
+            self.directory.mkdir()
 
     def tearDown(self):
-        shutil.rmtree(self.directory)
+        if self.temporary is not None:
+            self.temporary.cleanup()
+        else:
+            shutil.rmtree(self.directory)
 
     def write_events(self, path, events, mode="w"):
         with path.open(mode, encoding="utf-8") as stream:
@@ -400,6 +409,36 @@ class ReducerTests(unittest.TestCase):
                                                 toolRequests=[]),
                                    event("assistant.turn_end", turnId="0")), (0, 0))
 
+    def test_root_work_clears_shutdown_without_resume(self):
+        for resumed in (event("user.message", delivery="idle"),
+                        busy(), event("tool.execution_start", toolCallId="new")):
+            with self.subTest(kind=resumed["type"]):
+                self.feed(event("session.shutdown"))
+                self.assertTrue(self.state.shutdown)
+                self.feed(resumed)
+                self.assertFalse(self.state.shutdown)
+                self.feed(busy(), *finish())
+                self.assertEqual(self.state.counts(), (0, 0))
+                self.assertFalse(self.state.shutdown)
+                self.feed(event("session.shutdown"))
+                self.assertTrue(self.state.shutdown)
+
+    def test_late_events_do_not_clear_shutdown(self):
+        for late in (event("user.message", delivery="queued"),
+                     event("user.message", delivery="idle", source="agent-child"),
+                     event("assistant.turn_start", agent="child"),
+                     event("tool.execution_start", agent="child", toolCallId="child-tool"),
+                     event("subagent.started", agent="child"),
+                     event("subagent.completed", agent="child"),
+                     event("tool.execution_complete", toolCallId="old"),
+                     event("assistant.message", turnId="old"),
+                     event("assistant.turn_end", turnId="old"),
+                     event("hook.end", hookInvocationId="old"),
+                     event("session.info")):
+            with self.subTest(event=late):
+                self.feed(event("session.shutdown"), late)
+                self.assertTrue(self.state.shutdown)
+
 
 class TranscriptTests(Files):
     def setUp(self):
@@ -587,6 +626,7 @@ class SiblingDiscoveryTests(Files):
                            transcript=str(path), created=time.time(), start_offset=path.stat().st_size)
         self.records = {self.key("anchor"): self.anchor}
         self.discovery = activity.SiblingSessions()
+        self.addCleanup(self.discovery.close)
 
     @staticmethod
     def key(session):
@@ -648,6 +688,27 @@ class SiblingDiscoveryTests(Files):
         with self.assertLogs(activity.LOG, level="WARNING"):
             self.assertEqual(self.discovery.discover(records), {})
         self.assertEqual(set(self.discovery.discover(self.records)), {self.key("sibling")})
+
+    def test_explicit_close_survives_discovery_restart_and_pane_scope_changes(self):
+        sibling = self.transcript("closed")
+        closed = {self.key("closed"): dict(pid=self.pid, token=self.token,
+                                         transcript=str(sibling.resolve()))}
+        ambiguous = dict(self.records, other=dict(self.anchor, pane_id="2"))
+        self.assertEqual(self.discovery.discover(ambiguous, closed), {})
+        self.assertEqual(self.discovery.discover(self.records, closed), {})
+        self.discovery.close()
+        self.discovery = activity.SiblingSessions()
+        self.addCleanup(self.discovery.close)
+        self.write_events(sibling, [busy()], "a")
+        self.assertEqual(self.discovery.discover(self.records, closed), {})
+        closed[self.key("closed")]["token"] = "previous-owner"
+        self.assertEqual(set(self.discovery.discover(self.records, closed)), {self.key("closed")})
+
+    def test_invalid_closed_registry_is_an_explicit_error(self):
+        for value in ([], {"bad": None}, {"bad": dict(pid=True, token="old", transcript="synthetic")}):
+            activity.atomic_json(self.directory / "closed-sessions.json", value)
+            with self.assertRaisesRegex(ValueError, "closed-session registry"):
+                activity.closed_sessions(self.directory)
 
 
 class RuntimeTests(Files):
@@ -871,6 +932,58 @@ class RuntimeTests(Files):
                 record["token"] = "not-the-process-start-token"
             activity.atomic_json(self.cache / "registrations.json", records)
         self.wait_for(lambda s: s["tabs"][0]["name"] == "work")
+
+    def test_unchanged_worker_cycles_do_not_rewrite_registrations(self):
+        self.transcript("a", [busy()])
+        self.assert_process(self.launch())
+        self.wait_for(lambda s: s["tabs"][0]["name"] != "work")
+        status = activity.read_json(self.cache / "status.json")
+        path = self.cache / "registrations.json"
+        modified = path.stat().st_mtime_ns
+        self.wait_for(lambda s: activity.read_json(self.cache / "status.json", {}).get(
+            "heartbeat", 0) > status["heartbeat"] + 1)
+        self.assertEqual(path.stat().st_mtime_ns, modified)
+
+    def test_explicit_close_blocks_rediscovery_until_new_registration(self):
+        path = self.transcript("a", [])
+        self.transcript("b", [])
+        self.assert_process(self.launch("a"))
+        self.assert_process(self.launch("b"))
+        self.assert_process(self.launch("a", hook="sessionEnd"))
+        closed = activity.closed_sessions(self.cache)
+        self.assertEqual(len(closed), 1)
+        self.write_events(path, [busy()], "a")
+        time.sleep(6)
+        self.assertEqual({record["session_id"] for record in activity.read_json(
+            self.cache / "registrations.json").values()}, {"b"})
+        self.assert_process(self.launch("a"))
+        self.assertEqual(activity.closed_sessions(self.cache), {})
+        self.wait_for(lambda state: state["tabs"][0]["name"] == activity.prefix((1, 0)) + "work")
+        self.assertEqual({record["session_id"] for record in activity.read_json(
+            self.cache / "registrations.json").values()}, {"a", "b"})
+
+    def test_crash_after_close_journal_does_not_readopt_closed_root(self):
+        self.transcript("a", [busy()])
+        self.transcript("b", [])
+        self.assert_process(self.launch("a"))
+        self.assert_process(self.launch("b"))
+        self.wait_for(lambda state: state["tabs"][0]["name"] != "work")
+        writer = activity.read_json(self.cache / "status.json")["pid"]
+        with activity.Lock(self.cache / "registry.lock"):
+            records = activity.read_json(self.cache / "registrations.json")
+            key = hashlib.sha256(b"a").hexdigest()
+            activity.atomic_json(self.cache / "closed-sessions.json", {
+                key: {field: records[key][field] for field in ("pid", "token", "transcript")},
+            })
+            os.kill(writer, signal.SIGTERM)
+            deadline = time.monotonic() + 5
+            while activity.process_token(writer) and time.monotonic() < deadline:
+                time.sleep(0.1)
+            self.assertIsNone(activity.process_token(writer))
+        self.assert_process(self.launch("b"))
+        self.wait_for(lambda state: state["tabs"][0]["name"] == "work")
+        self.assertEqual({record["session_id"] for record in activity.read_json(
+            self.cache / "registrations.json").values()}, {"b"})
 
     def test_crashed_writer_restarts_and_restores_journal(self):
         path = self.transcript("a", [busy()])

@@ -60,7 +60,7 @@ Build the ready-to-run application explicitly from Windows PowerShell:
 
 This uses the installed .NET Framework MSBuild/C# toolchain, not a modern .NET
 SDK. Output is `windows-helper\gadget\bin\Release\CopilotSessions.exe`, its
-`.exe.config`, and the three shared Python collector files beside it. Rebuild
+`.exe.config`, and the five shared Python collector files beside it. Rebuild
 after changing native or collector sources. Normal launch never compiles code.
 
 Run `scripts\gadget.cmd` from Windows Explorer, or launch the executable directly:
@@ -292,6 +292,9 @@ Requirements and scope:
   share one CLI process. Multiple owners of the same session are deduplicated
   by session identity, not PID. Closing one session does not remove its siblings;
   stale locks, missing transcripts, and explicitly shut-down sessions are excluded.
+  Later root-agent turns, tool starts, or idle user requests reopen a shut-down
+  session even if the CLI omits `session.resume`. Late child events and completion
+  records alone do not reopen it.
   Child work within a root transcript is included in that root's status.
 - The native application owns typed snapshot validation, source aggregation,
   monitoring, and collector process cancellation. It launches a Windows Python
@@ -324,7 +327,7 @@ On native Windows, from the repository root:
 
 ```powershell
 $env:PYTHONPATH = "tests"
-python -m unittest test_session_gadget -q
+python -m unittest test_session_gadget test_activity test_outer_progress test_session_discovery test_transcript_stream test_zellij_snapshot -q
 ```
 
 The Windows suite explicitly compiles all production C# sources into the
@@ -338,8 +341,102 @@ I/O/process errors. Both platforms test the shared scanner/reducer, versioned
 watch protocol and EOF, injected WSL bootstrap, and prebuilt compatibility launch.
 Fixtures use isolated test homes/caches and local processes, not real user
 transcripts. Native UI tests briefly open test windows.
+Keyboard-driven WPF checks require an active, unlocked input desktop and fail
+explicitly when it is unavailable; a locked/remote test environment is not a pass.
 The optional `COPILOT_GADGET_LIVE_TEST=1` check requires open Windows and WSL Copilot
 sessions and starts real read-only collectors; it is disabled by default.
+
+### Resource behavior and benchmarks
+
+The collector still polls about every two seconds; terminal coordinators retain
+their one-second sleep, sibling discovery its five-second cadence, and WSL
+distribution discovery its ten-second cadence. These optimizations do not slow
+the normal refresh to save CPU.
+
+Session discovery starts with a complete enumeration, then indexes relevant
+directory/lock changes using native Windows directory notifications or Linux
+inotify. Every cached candidate still undergoes the original live PID, lock,
+start-token, boot, and transcript checks on each poll. Transcript appends and
+SDK snapshot replacements do not cause full archive walks. Linux uses one
+descriptor with up to 8,192 directory watches; Windows uses one recursive
+directory handle and one event, without a watcher thread. Both close on shutdown.
+
+Overflow, watch limits, unsupported filesystems, linked/mounted session
+directories, and notification errors fall back to complete scans at the existing
+cadence. Collectors report that fallback in diagnostics and retry notifications
+after 60 seconds rather than spinning. Linux enables indexing only on recognized
+local filesystem types; network/translated filesystems use complete scans.
+Fallback preserves discovery correctness, but not the archive-scan CPU savings.
+
+Ordinary JSONL records up to 256 KiB keep the standard JSON decoder. Larger
+records are validated in 64 KiB chunks, retaining reducer metadata instead of
+prompt/result strings. Complete large records are applied in the same poll, not
+split across extra refresh cycles. Partial tails wait for completion; malformed
+records produce Unknown/terminal attention and an error, never false completion.
+Replacing a malformed transcript with valid history clears that parse error.
+Meaningful activity hashes retain the exact canonical JSON fingerprint used by
+existing saved dismissals, including duplicate-key and Unicode behavior.
+Canonical hashing rereads seekable transcript spans in bounded key batches;
+it does not create scratch copies of transcript contents.
+
+The bound is on large payload text, not on the number of live sessions or the
+size of semantically required identifiers/metadata. Deep nesting and unusually
+wide objects can also increase parser work. Large meaningful records cost more
+CPU and wall time than a whole-record decode; a sampled 64 MiB meaningful record
+took about 3 seconds on WSL and Windows, versus 0.9 and 1.3
+seconds before. There are no new Python dependencies or persistent processes.
+These changes do not reduce the WPF window's resident memory.
+
+Matched local synthetic measurements, not portable guarantees:
+
+| Workload | Before | After |
+| --- | --- | --- |
+| WSL Zellij 0.44.1 / Snap, metadata child CPU per snapshot | 441.3 ms | 236.8 ms (46% less) |
+| Native Zellij 0.44.0, median metadata wall time | 595.4 ms | 332.2 ms |
+| Windows, 10 live + 565 archived sessions, warm median scan | 139.8 ms | 31.2 ms (78% less) |
+| Windows, 10 live + 1,000 archived sessions, warm median scan | 245.6 ms | 28.0 ms (89% less) |
+| WSL, 10 live + 1,000 archived sessions, warm median scan | 10.3 ms | 0.7 ms |
+| Windows, 30,000 ordinary history events, median replay CPU | 984.4 ms | 265.6 ms (73% less) |
+| WSL, 64 MiB meaningful record, additional peak RSS | 256.4 MiB | less than 0.1 MiB |
+| Windows, 64 MiB meaningful record, additional peak working set | 256.1 MiB | less than 0.6 MiB |
+
+Real Zellij snapshots use one metadata subprocess instead of two when pane JSON
+contains complete tab names. Older/incomplete schemas and unresolved journal-owned
+tabs retain the validated two-query fallback. Names remain fresh each cycle,
+including plugin/exited-pane tab metadata; manual renames and pane moves are not
+hidden by title caching. Unchanged registration files are no longer rewritten.
+The transcript reader advances known byte offsets instead of querying the native
+file position for each ordinary event. Repeated WSL ordinary-history samples had
+median CPU of 312 ms before and 326 ms after (about 4% higher, below the 15%
+investigation threshold).
+
+Reproduce measurements from the repository root, with no real session data:
+
+```bash
+python3 tests/resource_benchmark.py --case scan --sessions 10 --archives 565
+python3 tests/resource_benchmark.py --case scan --sessions 10 --archives 1000
+python3 tests/resource_benchmark.py --case record --record-mib 16
+python3 tests/resource_benchmark.py --case record --record-mib 64 --meaningful
+python3 tests/resource_benchmark.py --case history
+python3 tests/resource_benchmark.py --case zellij --iterations 30
+```
+
+Use native `python` for the same commands on Windows. `--source-dir` selects a
+separate collector-source directory for a matched baseline. Fixtures are created
+outside the measured child; Zellij creates and deletes only its uniquely named
+disposable session (a new console on Windows). Run before/after samples
+sequentially under comparable load. Output contains aggregate timings, own CPU,
+waited-child CPU where available, and current/peak resident memory; unavailable
+counters are `null`, not zero. Windows child CPU is currently unavailable, so its
+Zellij wall time is not presented as a CPU measurement. Memory measurements are
+transient peaks, not a long-running leak test.
+
+Deterministic operation counts, fingerprint compatibility, failure/recovery,
+and repeated watcher start/stop resource counts are covered by:
+
+```bash
+PYTHONPATH=tests python3 -m unittest test_session_discovery test_transcript_stream test_zellij_snapshot -q
+```
 
 ## Secret-scanning Git hooks
 
@@ -491,6 +588,13 @@ Initial hooks resolve `COPILOT_HOME/session-state/<sessionId>/events.jsonl`
 The initial `session.start` must match the registration's session ID. Child
 `agentStop` cannot register against its parent's transcript or clear root work.
 `sessionEnd` unregisters only its matching process identity.
+An explicit close is recorded in the OS-local `closed-sessions.json` journal
+before its registration is removed. Sibling discovery cannot re-adopt that
+root while the same owner identity remains alive, even after a coordinator crash
+or a change in the owner's remaining registered panes. A new registration hook
+reopens the root and clears its close marker; markers from dead/reused owners
+are pruned on subsequent hooks. This journal contains only process identities
+and transcript paths, not transcript contents.
 
 One detached Python coordinator per OS-local Zellij session owns all title
 writes. Unix uses `flock`; Windows uses a named OS mutex. Registrations are
@@ -512,6 +616,8 @@ This does not change the per-session SDK bridge or CLI taskbar-presence settings
 
 The coordinator polls about once per second (plus Zellij RPC time), tails
 transcripts incrementally, and re-queries pane-to-tab mappings each cycle.
+Complete pane metadata also supplies tab names, avoiding a second subprocess
+without caching titles; incomplete metadata uses the validated tab-query fallback.
 Large initial backlogs are processed in bounded batches without publishing
 historical working states. Partial JSONL lines wait for completion; truncation,
 replacement, and resume reset state. Pane moves update both old and new tabs.
@@ -631,7 +737,7 @@ py -3 -m unittest discover -s .\tests -v
 ```
 
 Tests create and remove uniquely named `.runtime-*` directories **inside**
-`tests/`. Fake Zellij and desktop providers prevent changes
+`tests/` on Unix and OS-local temporary directories on Windows. Fake Zellij and desktop providers prevent changes
 to real sessions or real toasts. Both actual shell wrappers are exercised when
 their runtimes are available; the Windows notification test substitutes only
 the helper executable path with a capture script. These tests do not establish
@@ -640,6 +746,10 @@ Native PowerShell tests explicitly skip if the filesystem's execution policy
 rejects scripts (for example, this checkout accessed through a WSL UNC path);
 no policy is bypassed or changed. Run from an approved native checkout to
 validate those wrappers on Windows.
+Run keyboard-driven WPF checks from an unlocked Windows desktop with an owned
+native console. Input-desktop access alone does not guarantee foreground
+activation; piped/headless launches can lose popup focus. Keep their native
+keyboard assertions enabled.
 
 An opt-in automated live test creates a uniquely named disposable Zellij
 session, runs the real hook wrappers against replayed lifecycle records, checks
@@ -649,13 +759,13 @@ actual pane/tab names, and removes its session and fixtures:
 COPILOT_NOTIFY_LIVE_TEST=1 python3 -m unittest discover -s tests -p test_activity_live.py -v
 ```
 
-This passed on WSL Zellij 0.44.1. On the tested native Windows Zellij 0.44.0,
-`attach --create-background` returned success but did not expose the disposable
-session to subsequent actions, including when invoked outside the test harness.
-The native Windows wrapper/coordinator regression suite passed from a local
-path; native Windows live rendering still requires the interactive procedure
-below. The automated live test reports this startup failure rather than skipping
-it or claiming that rendering passed.
+This passed on WSL Zellij 0.44.1. Native Windows Zellij 0.44.0 needs the test's
+new-console startup; `attach --create-background` did not expose a usable session
+in the tested environment. Pane setup and metadata queries work with that console,
+but a PowerShell authorization failure on a UNC checkout still blocks the real
+hook test. Use an approved native checkout for end-to-end Windows validation.
+The automated live test reports that failure rather than bypassing policy or
+claiming that rendering passed.
 
 For live verification without installing or touching existing panes:
 

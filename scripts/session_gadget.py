@@ -35,7 +35,11 @@ def main():
     parser.add_argument("--snapshot", action="store_true", help="Print native session discovery as JSON")
     args = parser.parse_args()
     if args.snapshot:
-        print(json.dumps(Scanner().snapshot(), indent=2))
+        scanner = Scanner()
+        try:
+            print(json.dumps(scanner.snapshot(), indent=2))
+        finally:
+            scanner.close()
         return 0
     if os.name != "nt":
         parser.error("Launch the prebuilt gadget on Windows; Windows Python 3.9+ remains required.")

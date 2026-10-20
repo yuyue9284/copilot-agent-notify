@@ -33,6 +33,7 @@ class ScannerTests(unittest.TestCase):
         cache.start()
         self.addCleanup(cache.stop)
         self.scanner = probe.Scanner(self.home)
+        self.addCleanup(self.scanner.close)
         self.token = patch.object(probe, "process_token", return_value="identity")
         self.token.start()
         self.addCleanup(self.token.stop)
@@ -349,6 +350,39 @@ class ScannerTests(unittest.TestCase):
 
     def test_shutdown_is_not_an_open_session(self):
         self.session(events=[event("session.shutdown")])
+        self.assertEqual(self.scanner.snapshot()["sessions"], [])
+
+    def test_root_work_after_shutdown_reappears_without_resume(self):
+        for cold_start in (False, True):
+            for resumed, expected in (
+                    (event("user.message", delivery="idle"), "In progress"),
+                    (event("assistant.turn_start"), "In progress"),
+                    (event("tool.execution_start", toolName="ask_user", toolCallId="new"),
+                     "Needs input")):
+                with self.subTest(cold_start=cold_start, kind=resumed["type"]):
+                    self.scanner = probe.Scanner(self.home)
+                    directory = self.session(events=[event("session.shutdown")])
+                    if not cold_start:
+                        self.assertEqual(self.scanner.snapshot()["sessions"], [])
+                    self.write(directory, [resumed], "a")
+                    self.assertEqual(self.status(), expected)
+                    self.write(directory, [
+                        event("tool.execution_complete", toolCallId="new"),
+                        event("assistant.turn_start"),
+                        event("assistant.message", turnId="new"),
+                        event("assistant.turn_end", turnId="new")], "a")
+                    self.assertEqual(self.status(), "Done")
+                    self.write(directory, [event("session.shutdown")], "a")
+                    self.assertEqual(self.scanner.snapshot()["sessions"], [])
+
+    def test_late_child_and_completion_events_do_not_reopen_session(self):
+        self.session(events=[
+            event("session.shutdown"),
+            dict(event("assistant.turn_start"), agentId="child"),
+            dict(event("tool.execution_start", toolCallId="child-tool"), agentId="child"),
+            event("tool.execution_complete", toolCallId="old"),
+            event("assistant.turn_end", turnId="old"),
+            event("session.info")])
         self.assertEqual(self.scanner.snapshot()["sessions"], [])
 
     def test_missing_transcript_is_not_done(self):
