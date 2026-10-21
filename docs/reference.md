@@ -50,6 +50,22 @@ copilot plugin install yuyue9284/copilot-agent-notify
 Restart Copilot CLI after installation. Use `copilot plugin list` or
 `/plugin list` to confirm that `personal-agent-notify` is enabled.
 
+The plugin requires a Copilot CLI version supporting Agent Plugins v1. Its
+runtime components live under `com.github.copilot/`, separately from repository
+development configuration. `.github/lsp.json` enables C# LSP when developing in
+this repository, but is not loaded as an installed-plugin contribution. The
+plugin defines no `com.github.copilot/lsp.json`, so installing it does not change
+the host's language-server settings, including a user-level C#-disabled default.
+
+Do not migrate the development LSP file into the plugin namespace or remove the
+manifest's Agent Plugins v1 schema. Ignore rules alone cannot protect local
+directory installs, which copy ignored files too. Regression tests check the
+configuration boundary and, when Copilot CLI is available, install an isolated
+copy to verify that the plugin contributes no language servers.
+
+After upgrading an older installed copy, restart existing Copilot sessions to
+reload both the plugin manifest and its hooks.
+
 ## Desktop session gadget (Windows + WSL)
 
 Build the ready-to-run application explicitly from Windows PowerShell:
@@ -737,7 +753,10 @@ py -3 -m unittest discover -s .\tests -v
 ```
 
 Tests create and remove uniquely named `.runtime-*` directories **inside**
-`tests/` on Unix and OS-local temporary directories on Windows. Fake Zellij and desktop providers prevent changes
+`tests/` on Unix and OS-local temporary directories on Windows. Isolated plugin
+configuration tests use OS-local temporary directories on both platforms so the
+development repository's LSP settings cannot affect the simulated plugin host.
+Fake Zellij and desktop providers prevent changes
 to real sessions or real toasts. Both actual shell wrappers are exercised when
 their runtimes are available; the Windows notification test substitutes only
 the helper executable path with a capture script. These tests do not establish
@@ -875,7 +894,7 @@ copilot plugin uninstall personal-agent-notify
 
 ## Repository layout
 
-- `plugin.json` and `hooks.json`: plugin identity and lifecycle hooks.
+- `plugin.json` and `com.github.copilot/hooks/hooks.json`: plugin identity and lifecycle hooks.
 - `scripts/`: shared session collectors, notification delivery, and Zellij activity coordination.
 - `windows-helper/gadget/`: native WPF session window and collector host.
 - `windows-helper/`: gadget build/install scripts and native notification helper.

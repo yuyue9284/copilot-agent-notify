@@ -23,3 +23,13 @@ published build artifacts as public-facing.
   history as well.
 - If completing a task requires sensitive data, keep it outside the repository
   and ask before placing any form of it in a public-facing artifact.
+
+# Plugin boundaries
+
+Keep repository development configuration separate from installed plugin
+components. `.github/lsp.json` intentionally enables C# for development here.
+The plugin must retain the Agent Plugins v1 manifest schema and load its hooks
+from `com.github.copilot/hooks/hooks.json`. Do not add plugin LSP declarations or
+`com.github.copilot/lsp.json`, or migrate the development LSP file into the plugin
+namespace: installing notifications must not enable or disable host language
+servers.
