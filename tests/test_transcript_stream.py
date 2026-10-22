@@ -151,6 +151,23 @@ class StreamTests(unittest.TestCase):
                     reader.read_record(stream)
                 self.assertEqual(stream.tell(), len(raw) + 1)
 
+    def test_autopilot_completion_matches_fast_and_streamed_records(self):
+        for limit in (1024 * 1024, 8):
+            with self.subTest(limit=limit), patch.object(reader, "FAST_RECORD", limit):
+                state = Activity("synthetic-root")
+                for event in [
+                    {"type": "assistant.turn_start", "data": {"turnId": "complete-turn"}},
+                    {"type": "assistant.message", "data": {
+                        "turnId": "complete-turn", "toolRequests": [{"name": "task_complete"}]}},
+                    {"type": "session.task_complete", "data": {
+                        "success": True, "summary": "x" * 300000}},
+                ]:
+                    stream = io.BytesIO(json.dumps(event).encode() + b"\n")
+                    state.event(reader.read_record(stream)[1])
+                self.assertEqual(state.counts(), (1, 0))
+                state.event({"type": "assistant.turn_end", "data": {"turnId": "complete-turn"}})
+                self.assertEqual(state.counts(), (0, 0))
+
     def test_deterministic_generated_differential_fixtures(self):
         rng = random.Random(42)
 

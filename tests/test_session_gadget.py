@@ -207,6 +207,70 @@ class ScannerTests(unittest.TestCase):
             self.assertEqual(self.scanner.snapshot()["sessions"], [])
         self.assertEqual(self.scanner.readers, {})
 
+    def test_autopilot_completion_without_final_text_becomes_done(self):
+        directory = self.session(events=[
+            event("assistant.turn_start", turnId="complete-turn"),
+            event("assistant.message", turnId="complete-turn",
+                  toolRequests=[{"name": "task_complete"}]),
+            event("tool.execution_start", toolCallId="complete", toolName="task_complete"),
+        ])
+        self.assertEqual(self.status(), "In progress")
+        revision = self.scanner.snapshot()["sessions"][0]["activity_revision"]
+        self.write(directory, [
+            event("tool.execution_complete", toolCallId="complete", success=True),
+            event("session.task_complete", success=True, summary="Synthetic result"),
+            event("session.autopilot_objective_changed", operation="update", id=1, status="completed"),
+            event("assistant.turn_end", turnId="complete-turn"),
+            event("hook.start", hookType="agentStop", hookInvocationId="stop",
+                  input={"sessionId": "root"}),
+            event("hook.end", hookInvocationId="stop", success=True),
+        ], "a")
+        self.assertEqual(self.status(), "Done")
+        self.assertEqual(self.scanner.snapshot()["sessions"][0]["activity_revision"], revision)
+        self.assertEqual(probe.Scanner(self.home).snapshot()["sessions"][0]["status"], "Done")
+        self.write(directory, [event("assistant.turn_start", turnId="next-turn")], "a")
+        self.assertEqual(self.status(), "In progress")
+
+    def test_autopilot_completion_keeps_sdk_shell_pending(self):
+        directory = self.session(events=[
+            event("assistant.turn_start", turnId="complete-turn"),
+            event("assistant.message", turnId="complete-turn",
+                  toolRequests=[{"name": "task_complete"}]),
+        ])
+        self.sdk_snapshot(directory, pending_shells=1)
+        self.assertEqual(self.status(), "In progress")
+        self.write(directory, [
+            event("session.task_complete", success=True),
+            event("assistant.turn_end", turnId="complete-turn"),
+        ], "a")
+        self.assertEqual(self.status(), "In progress")
+        self.sdk_snapshot(directory, settling=True)
+        self.assertEqual(self.status(), "In progress")
+        self.sdk_snapshot(directory)
+        self.assertEqual(self.status(), "Done")
+
+    def test_autopilot_completion_keeps_child_work_and_completion_grace(self):
+        directory = self.session(events=[
+            event("assistant.turn_start", turnId="complete-turn"),
+            self.child_event("assistant.turn_start"),
+            event("assistant.message", turnId="complete-turn",
+                  toolRequests=[{"name": "task_complete"}]),
+        ])
+        with patch.object(probe.time, "monotonic", return_value=100) as clock:
+            self.assertEqual(self.status(), "In progress")
+            self.write(directory, [
+                event("session.task_complete", success=True),
+                event("assistant.turn_end", turnId="complete-turn"),
+            ], "a")
+            self.assertEqual(self.status(), "In progress")
+            self.assertFalse(next(iter(self.scanner.readers.values()))[0].state.root_busy)
+            self.write(directory, [self.child_event("subagent.completed")], "a")
+            self.assertEqual(self.status(), "In progress")
+            clock.return_value = 109.999
+            self.assertEqual(self.status(), "In progress")
+            clock.return_value = 110
+            self.assertEqual(self.status(), "Done")
+
     def test_dead_or_reused_pid_does_not_resurrect_old_session(self):
         directory = self.session()
         os.utime(directory / "inuse.42.lock", (1, 1))

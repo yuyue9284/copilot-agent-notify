@@ -4,7 +4,7 @@ from pathlib import Path
 import sys
 from unittest.mock import Mock, patch
 
-from test_activity import Files, activity
+from test_activity import Files, activity, event
 from outer_progress import OuterProgress, attaches_to, progress_sequence, progress_state, windows_args
 
 
@@ -72,6 +72,33 @@ class OuterProgressTests(Files):
         self.outer.update((1, 0))
         self.outer.update((0, 0))
         self.outer.write.assert_called_with(self.target, 0, completed=True)
+
+    def test_autopilot_terminal_tool_clears_progress_and_notifies_once(self):
+        state = activity.Activity("root")
+        for item in (
+            event("assistant.turn_start", turnId="complete-turn"),
+            event("assistant.message", turnId="complete-turn",
+                  toolRequests=[{"name": "task_complete"}]),
+            event("tool.execution_start", toolCallId="complete", toolName="task_complete"),
+            event("tool.execution_complete", toolCallId="complete", success=True),
+            event("session.task_complete", success=True, summary="Synthetic result"),
+        ):
+            state.event(item)
+            self.outer.update(state.counts())
+        self.outer.write.assert_called_once_with(self.target, 3)
+        state.event(event("assistant.turn_end", turnId="complete-turn"))
+        self.outer.update(state.counts())
+        self.outer.write.assert_called_with(self.target, 0, completed=True)
+        self.assertEqual(self.outer.write.call_count, 2)
+        self.outer.write.reset_mock()
+        for item in (
+            event("hook.start", hookType="agentStop", hookInvocationId="stop",
+                  input={"sessionId": "root"}),
+            event("hook.end", hookInvocationId="stop", success=True),
+        ):
+            state.event(item)
+            self.outer.update(state.counts())
+        self.outer.write.assert_not_called()
 
     def test_recovery_from_unknown_clears_without_completion_bell(self):
         self.outer.update((1, 0))

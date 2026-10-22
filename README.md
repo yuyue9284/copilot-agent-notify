@@ -103,6 +103,10 @@ configuration, collector files, and notification helper.
 commands, or the requested task succeeded. There is no inactivity timeout that
 marks long-running work as finished.
 
+Autopilot's explicit task-completion event is recognized even when its terminal
+tool replaces the final text response. The main agent must still finish its turn
+or stop hook; tracked background work continues to keep the session in progress.
+
 When the last background agent finishes while the main agent is idle, the
 gadget holds **In progress** for a **10-second grace period** before displaying
 **Done** and notifying you. Resumed work cancels the pending completion. This

@@ -215,6 +215,79 @@ class ReducerTests(unittest.TestCase):
         self.assertEqual(self.feed(busy(), event("assistant.message", toolRequests=[{}]),
                                    event("assistant.turn_end")), (1, 0))
 
+    def task_complete(self, success=True, agent=None):
+        return [
+            event("assistant.turn_start", agent=agent, turnId="complete-turn"),
+            event("assistant.message", agent=agent, turnId="complete-turn",
+                  toolRequests=[{"name": "task_complete"}]),
+            event("tool.execution_start", agent=agent, toolCallId="complete",
+                  toolName="task_complete"),
+            event("tool.execution_complete", agent=agent, toolCallId="complete", success=True),
+            event("session.task_complete", agent=agent, success=success, summary="Synthetic result"),
+        ]
+
+    def test_autopilot_completion_without_final_text_uses_matching_turn_end(self):
+        for success in (True, False):
+            with self.subTest(success=success):
+                self.state.reset()
+                self.assertEqual(self.feed(*self.task_complete(success)), (1, 0))
+                self.assertEqual(self.feed(event("assistant.turn_end", turnId="other")), (1, 0))
+                self.assertEqual(self.feed(event("assistant.turn_end", turnId="complete-turn")), (0, 0))
+                self.assertEqual(self.feed(*finish()[1:]), (0, 0))
+
+    def test_autopilot_completion_and_stop_hooks_in_either_order(self):
+        for stop_first in (True, False):
+            with self.subTest(stop_first=stop_first):
+                self.state.reset()
+                events = self.task_complete()
+                self.feed(*events[:-1])
+                self.assertEqual(self.feed(*(finish()[1:] if stop_first else events[-1:])), (1, 0))
+                self.assertEqual(self.feed(*(events[-1:] if stop_first else finish()[1:])), (0, 0))
+
+    def test_autopilot_completion_preserves_children_attention_and_tools(self):
+        self.feed(event("subagent.started", agent="child"),
+                  event("tool.execution_start", agent="child", toolCallId="ask", toolName="ask_user"),
+                  *self.task_complete())
+        self.assertEqual(self.feed(event("tool.execution_start", toolCallId="running"),
+                                   event("assistant.turn_end", turnId="complete-turn")), (1, 1))
+        self.feed(event("tool.execution_complete", toolCallId="running"))
+        self.assertEqual(self.feed(event("assistant.turn_end", turnId="complete-turn")), (0, 1))
+        self.assertEqual(self.feed(event("tool.execution_complete", agent="child",
+                                        toolCallId="ask")), (1, 0))
+        self.assertEqual(self.feed(event("subagent.completed", agent="child")), (0, 0))
+
+    def test_child_task_completion_does_not_finish_root(self):
+        self.feed(busy(), *self.task_complete(agent="child"))
+        self.assertEqual(self.feed(event("assistant.turn_end", turnId="complete-turn")), (1, 0))
+        self.assertTrue(self.state.root_busy)
+        self.assertFalse(self.state.final)
+
+    def test_autopilot_completion_waits_for_pending_stop_hook(self):
+        self.feed(*self.task_complete(), finish()[1])
+        self.assertEqual(self.feed(event("assistant.turn_end", turnId="complete-turn")), (1, 0))
+        self.assertEqual(self.feed(finish()[2]), (0, 0))
+
+    def test_autopilot_without_turn_id_requires_stop_hook(self):
+        self.feed(busy(), event("assistant.turn_start"),
+                  event("assistant.message", toolRequests=[{"name": "task_complete"}]),
+                  event("session.task_complete", success=True))
+        self.assertEqual(self.feed(event("assistant.turn_end")), (1, 0))
+        self.assertEqual(self.feed(*finish()[1:]), (0, 0))
+
+    def test_autopilot_completion_does_not_finish_resumed_turn(self):
+        self.assertEqual(self.feed(*self.task_complete(),
+                                   event("assistant.turn_end", turnId="complete-turn")), (0, 0))
+        self.assertEqual(self.feed(event("assistant.turn_start", turnId="next-turn"),
+                                   event("assistant.turn_end", turnId="complete-turn"),
+                                   event("assistant.turn_end", turnId="next-turn")), (1, 0))
+        self.assertEqual(self.feed(event("assistant.message", turnId="next-turn"),
+                                   event("assistant.turn_end", turnId="next-turn")), (0, 0))
+
+    def test_completion_tool_result_alone_is_not_terminal_evidence(self):
+        self.feed(*self.task_complete()[:-1])
+        self.assertEqual(self.feed(event("assistant.turn_end", turnId="complete-turn"),
+                                   *finish()[1:]), (1, 0))
+
     def test_matching_final_message_and_turn_end_without_stop_hook(self):
         for phase in (None, "final_answer"):
             self.state.reset()

@@ -421,6 +421,7 @@ class Activity:
 
     def reset(self):
         self.root_busy = False
+        self.root_turn = None
         self.children = set()
         self.child_tools = {}
         self.child_final = set()
@@ -480,6 +481,7 @@ class Activity:
             if data.get("delivery") == "idle" and data.get("source") in (None, "", "user"):
                 self.shutdown = False
                 self.root_busy = True
+                self.root_turn = None
                 self.final = self.stopped = False
                 self.final_turn = None
                 self.stop_hooks.clear()
@@ -490,6 +492,7 @@ class Activity:
                 # Continued sessions do not always emit session.resume.
                 self.shutdown = False
                 self.root_busy = True
+                self.root_turn = data.get("turnId")
                 self.final = self.stopped = False
                 self.final_turn = None
                 self.stop_hooks.clear()
@@ -502,6 +505,10 @@ class Activity:
                 self.child_stopped.discard(actor)
                 self.child_stop_hooks = {key: value for key, value in self.child_stop_hooks.items()
                                          if value != actor}
+        elif kind == "session.task_complete" and root:
+            # Autopilot's terminal tool replaces the final assistant message.
+            self.final = True
+            self.final_turn = self.root_turn
         elif kind == "assistant.message" and root:
             self.final = not bool(data.get("toolRequests"))
             self.final_turn = (data.get("turnId") if self.final
