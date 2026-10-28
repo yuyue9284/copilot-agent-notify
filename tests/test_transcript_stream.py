@@ -168,6 +168,21 @@ class StreamTests(unittest.TestCase):
                 state.event({"type": "assistant.turn_end", "data": {"turnId": "complete-turn"}})
                 self.assertEqual(state.counts(), (0, 0))
 
+    def test_active_resume_preserves_work_in_fast_and_streamed_records(self):
+        for limit in (1024 * 1024, 8):
+            with self.subTest(limit=limit), patch.object(reader, "FAST_RECORD", limit):
+                state = Activity("synthetic-root")
+                for event in [
+                    {"type": "user.message", "data": {"delivery": "idle"}},
+                    {"type": "session.resume", "data": {
+                        "sessionWasActive": True, "continuePendingWork": False}},
+                ]:
+                    stream = io.BytesIO(json.dumps(event).encode() + b"\n")
+                    state.event(reader.read_record(stream)[1])
+                    self.assertEqual(state.counts(), (1, 0))
+                state.event({"type": "session.resume", "data": {"sessionWasActive": False}})
+                self.assertEqual(state.counts(), (0, 0))
+
     def test_deterministic_generated_differential_fixtures(self):
         rng = random.Random(42)
 

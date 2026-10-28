@@ -475,6 +475,27 @@ class ReducerTests(unittest.TestCase):
                                        event(kind)), (0, 0))
         self.assertEqual(self.feed(busy()), (1, 0))
 
+    def test_active_resume_preserves_inflight_root_and_child_work(self):
+        self.feed(busy(), event("tool.execution_start", toolCallId="running"),
+                  event("subagent.started", agent="child"))
+        self.assertEqual(self.feed(event("session.resume", sessionWasActive=True,
+                                        continuePendingWork=False)), (1, 0))
+        self.assertEqual(self.state.tools["root"], {"running"})
+        self.feed(event("assistant.message", turnId="0"),
+                  event("assistant.turn_end", turnId="0"),
+                  event("subagent.completed", agent="child"))
+        self.assertEqual(self.state.counts(), (1, 0))
+        self.assertEqual(self.feed(event("tool.execution_complete", toolCallId="running"),
+                                   event("assistant.turn_end", turnId="0")), (0, 0))
+        self.assertEqual(self.feed(event("session.resume", sessionWasActive=True)), (0, 0))
+
+    def test_active_resume_preserves_pending_input_but_inactive_resume_resets(self):
+        self.feed(busy(), event("tool.execution_start", toolCallId="ask", toolName="ask_user"))
+        self.assertEqual(self.feed(event("session.resume", sessionWasActive=True)), (0, 1))
+        self.assertEqual(self.feed(event("tool.execution_complete", toolCallId="ask")), (1, 0))
+        self.assertEqual(self.feed(event("session.resume", sessionWasActive=False)), (0, 0))
+        self.assertEqual(self.state.tools, {})
+
     def test_resumed_session_finishes_with_legacy_no_phase_message(self):
         self.feed(busy(), event("tool.execution_start", toolCallId="abandoned"),
                   event("session.shutdown"), event("session.resume"))

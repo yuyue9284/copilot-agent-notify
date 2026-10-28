@@ -454,7 +454,9 @@ class Activity:
         actor = event.get("agentId") or self.session_id
         root = actor == self.session_id
         if kind in ("session.start", "session.resume") and root:
-            self.reset()
+            # Resuming an active session must not erase its in-flight request.
+            if kind != "session.resume" or data.get("sessionWasActive") is not True:
+                self.reset()
         elif kind == "session.shutdown" and root:
             self.reset()
             self.shutdown = True

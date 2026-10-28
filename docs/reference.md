@@ -636,7 +636,9 @@ Complete pane metadata also supplies tab names, avoiding a second subprocess
 without caching titles; incomplete metadata uses the validated tab-query fallback.
 Large initial backlogs are processed in bounded batches without publishing
 historical working states. Partial JSONL lines wait for completion; truncation,
-replacement, and resume reset state. Pane moves update both old and new tabs.
+replacement, and inactive or legacy resumes reset state. A resume explicitly
+marked `sessionWasActive: true` preserves tracked work and input requests until
+their normal completion events. Pane moves update both old and new tabs.
 No prompt, reasoning, tool result, or assistant text is copied into state files.
 
 There is **no working-session inactivity timeout**: a long tool invocation

@@ -207,6 +207,28 @@ class ScannerTests(unittest.TestCase):
             self.assertEqual(self.scanner.snapshot()["sessions"], [])
         self.assertEqual(self.scanner.readers, {})
 
+    def test_active_resume_does_not_finish_request_before_turn_history_is_committed(self):
+        directory = self.session(events=[event("user.message", delivery="idle")])
+        self.assertEqual(self.status(), "In progress")
+        revision = self.scanner.snapshot()["sessions"][0]["activity_revision"]
+        self.write(directory, [
+            event("session.resume", sessionWasActive=True, continuePendingWork=False),
+            event("hook.start", hookType="preToolUse", hookInvocationId="pre",
+                  input={"sessionId": "root"}),
+            event("hook.end", hookInvocationId="pre", success=True),
+        ], "a")
+        self.assertEqual(self.status(), "In progress")
+        self.assertEqual(self.scanner.snapshot()["sessions"][0]["activity_revision"], revision)
+        replay = probe.Scanner(self.home)
+        self.addCleanup(replay.close)
+        self.assertEqual(replay.snapshot()["sessions"][0]["status"], "In progress")
+        self.write(directory, [
+            event("assistant.turn_start", turnId="final"),
+            event("assistant.message", turnId="final", phase="final_answer"),
+            event("assistant.turn_end", turnId="final"),
+        ], "a")
+        self.assertEqual(self.status(), "Done")
+
     def test_autopilot_completion_without_final_text_becomes_done(self):
         directory = self.session(events=[
             event("assistant.turn_start", turnId="complete-turn"),

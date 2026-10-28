@@ -19,6 +19,7 @@ FIELDS = {
     "type": KEEP, "agentId": KEEP, "timestamp": KEEP,
     "data": {
         "sessionId": KEEP, "context": {"cwd": KEEP}, "agentId": KEEP,
+        "sessionWasActive": KEEP,
         "toolCallId": KEEP, "delivery": KEEP, "source": KEEP, "toolRequests": TRUTH,
         "turnId": KEEP, "phase": KEEP, "hookType": KEEP, "hookInvocationId": KEEP,
         "success": KEEP, "toolName": KEEP,
