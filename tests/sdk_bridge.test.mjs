@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -587,6 +588,50 @@ test("atomic publisher writes the local protocol and leaves no temporary files",
         assert.throws(() => snapshotPath("../outside", home));
         assert.throws(() => snapshotPath(undefined, home));
     } finally {
+        await rm(home, { recursive: true });
+    }
+});
+
+test("Windows publisher retries a transient reader lock without losing the snapshot", {
+    skip: process.platform !== "win32",
+}, async () => {
+    const home = await mkdtemp(join(tmpdir(), "gadget-sdk-test-"));
+    let child;
+    let exited;
+    try {
+        const path = snapshotPath("synthetic-session", home);
+        await writeSnapshot(path, { state: "ready" });
+        child = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
+            "$ErrorActionPreference='Stop'; " +
+            "$f=[IO.File]::Open($env:GADGET_TEST_PATH,[IO.FileMode]::Open," +
+            "[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite); " +
+            "try {[Console]::WriteLine('LOCKED'); [Console]::In.ReadLine() | Out-Null} " +
+            "finally {$f.Dispose()}",
+        ], { env: { ...process.env, GADGET_TEST_PATH: path }, stdio: ["pipe", "pipe", "pipe"] });
+        exited = new Promise((resolve, reject) => {
+            child.once("error", reject);
+            child.once("exit", code => code === 0 ? resolve() : reject(new Error("Reader helper failed")));
+        });
+        await Promise.race([
+            new Promise(resolve => child.stdout.once("data", resolve)),
+            exited.then(() => { throw new Error("Reader helper exited before acquiring its lock"); }),
+        ]);
+        await assert.rejects(writeSnapshot(path, { state: "blocked" }),
+            error => ["EPERM", "EACCES", "EBUSY"].includes(error.code));
+        assert.deepEqual(JSON.parse(await readFile(path, "utf8")), { state: "ready" });
+        assert.deepEqual(await readdir(join(home, "session-state", "synthetic-session")), ["gadget-sdk.json"]);
+        const release = setTimeout(() => child.stdin.end("\n"), 150);
+        try {
+            await writeSnapshot(path, { state: "updated" });
+        } finally {
+            clearTimeout(release);
+        }
+        await exited;
+        assert.deepEqual(JSON.parse(await readFile(path, "utf8")), { state: "updated" });
+        assert.deepEqual(await readdir(join(home, "session-state", "synthetic-session")), ["gadget-sdk.json"]);
+    } finally {
+        if (child && !child.stdin.writableEnded) child.stdin.end("\n");
+        if (exited) await exited;
         await rm(home, { recursive: true });
     }
 });

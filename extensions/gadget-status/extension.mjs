@@ -3,7 +3,16 @@ import { createBridge, snapshotPath, writeSnapshot } from "./bridge.mjs";
 // Only load this entry point through Copilot's extension host.
 const sessionId = process.env.SESSION_ID;
 const path = snapshotPath(sessionId);
-const publish = snapshot => writeSnapshot(path, snapshot);
+const publish = async snapshot => {
+    try {
+        await writeSnapshot(path, snapshot);
+    } catch (error) {
+        const code = ["EPERM", "EACCES", "EBUSY", "ENOSPC", "ENOENT", "EIO"].includes(error.code)
+            ? error.code : "other";
+        console.error(`Gadget SDK bridge: snapshot write failed (${code}).`);
+        throw error;
+    }
+};
 const unavailable = state => publish({
     protocol_version: 1, session_id: sessionId, owner_pid: process.ppid,
     updated_at: Date.now() / 1000, state,

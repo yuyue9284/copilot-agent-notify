@@ -3,6 +3,7 @@ import { mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { performance } from "node:perf_hooks";
+import { setTimeout as delay } from "node:timers/promises";
 
 const TERMINAL = new Set(["completed", "failed", "cancelled"]);
 const GRACE_MS = 10_000;
@@ -27,7 +28,17 @@ export async function writeSnapshot(path, snapshot) {
     const temporary = `${path}.${randomUUID()}.tmp`;
     try {
         await writeFile(temporary, JSON.stringify(snapshot) + "\n", { flag: "wx", mode: 0o600 });
-        await rename(temporary, path);
+        for (let attempt = 0; ; attempt++) {
+            try {
+                await rename(temporary, path);
+                break;
+            } catch (error) {
+                // Windows readers can briefly deny deletion of the replaced file.
+                if (process.platform !== "win32" || attempt === 19
+                        || !["EPERM", "EACCES", "EBUSY"].includes(error.code)) throw error;
+                await delay(25);
+            }
+        }
     } finally {
         await rm(temporary, { force: true });
     }
