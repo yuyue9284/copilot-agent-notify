@@ -385,11 +385,14 @@ SDK snapshot replacements do not cause full archive walks. Linux uses one
 descriptor with up to 8,192 directory watches; Windows uses one recursive
 directory handle and one event, without a watcher thread. Both close on shutdown.
 
-Overflow, watch limits, unsupported filesystems, linked/mounted session
-directories, and notification errors fall back to complete scans at the existing
-cadence. Collectors report that fallback in diagnostics and retry notifications
-after 60 seconds rather than spinning. Linux enables indexing only on recognized
-local filesystem types; network/translated filesystems use complete scans.
+Windows notification-buffer overflow triggers a complete reconciliation while
+keeping the re-armed watcher active. Repeated overflow that exhausts the bounded
+reconciliation budget, Linux overflow, watch limits, unsupported filesystems,
+linked/mounted session directories, and notification errors fall back to complete
+scans at the existing cadence. Collectors report that fallback in diagnostics and
+retry notifications after 60 seconds rather than spinning. Linux enables indexing
+only on recognized local filesystem types; network/translated filesystems use
+complete scans.
 Fallback preserves discovery correctness, but not the archive-scan CPU savings.
 
 Ordinary JSONL records up to 256 KiB keep the standard JSON decoder. Larger

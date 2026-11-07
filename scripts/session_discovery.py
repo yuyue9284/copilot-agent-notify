@@ -156,6 +156,7 @@ class WindowsChanges:
         pass
 
     def drain(self):
+        """Return changed sessions, or None when Windows needs a full scan."""
         from ctypes import wintypes
         dirty = set()
         for _ in range(32):
@@ -165,12 +166,14 @@ class WindowsChanges:
                 error = ctypes.get_last_error()
                 if error == 996:
                     return dirty
-                raise ctypes.WinError(error)
+                if error != 1022:
+                    raise ctypes.WinError(error)
+                size.value = 0
             self.pending = False
             data = self.buffer.raw[:size.value]
             self.arm()
             if not data:
-                raise WatchOverflow("directory change queue overflow")
+                return None
             position = 0
             while True:
                 following, _, length = struct.unpack_from("III", data, position)
@@ -275,6 +278,9 @@ class DiscoveryIndex:
             if self.watcher:
                 for _ in range(4):
                     dirty = self.watcher.drain()
+                    if dirty is None:
+                        self.full_scan()
+                        continue
                     if not dirty:
                         break
                     for name in dirty:

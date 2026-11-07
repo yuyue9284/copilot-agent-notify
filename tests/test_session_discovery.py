@@ -1,3 +1,4 @@
+import ctypes
 import errno
 import os
 from pathlib import Path
@@ -5,11 +6,11 @@ import sys
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from session_discovery import DiscoveryIndex, WatchOverflow
+from session_discovery import DiscoveryIndex, WatchOverflow, WindowsChanges
 
 
 class DiscoveryTests(unittest.TestCase):
@@ -103,6 +104,57 @@ class DiscoveryTests(unittest.TestCase):
         self.assertIsNone(self.index.error)
         self.assertIsNotNone(self.index.watcher)
 
+    def test_notification_loss_reconciles_and_keeps_watching(self):
+        old = self.lock("old")
+        self.changed({old})
+        watcher = self.index.watcher
+        old.unlink()
+        new = self.lock("new")
+        with patch.object(watcher, "drain", side_effect=[None, {"new"}, set()]), \
+                patch.object(self.index, "full_scan", wraps=self.index.full_scan) as full:
+            self.assertEqual(set(self.index.locks()), {new})
+            self.assertEqual(full.call_count, 1)
+        self.assertIs(self.index.watcher, watcher)
+        self.assertIsNone(self.index.error)
+        another = self.lock("another")
+        self.changed({new, another})
+
+    def test_repeated_notification_loss_uses_bounded_fallback(self):
+        old = self.lock("old")
+        self.changed({old})
+        watcher = self.index.watcher
+        new = self.lock("new")
+        with patch.object(watcher, "drain", return_value=None) as drain:
+            self.assertEqual(set(self.index.locks()), {old, new})
+            self.assertEqual(drain.call_count, 4)
+        self.assertIsNone(self.index.watcher)
+        self.assertIn("reconciliation budget", self.index.error)
+        another = self.lock("another")
+        self.changed({old, new, another})
+        self.index.retry_at = 0
+        self.changed({old, new, another})
+        self.assertIsNotNone(self.index.watcher)
+        self.assertIsNone(self.index.error)
+
+    @unittest.skipUnless(os.name == "nt", "requires native Windows directory notifications")
+    def test_windows_file_burst_recovers_without_disabling_notifications(self):
+        old = self.lock("old")
+        self.changed({old})
+        watcher = self.index.watcher
+        noise = old.parent / "checkpoints"
+        noise.mkdir()
+        for i in range(1500):
+            (noise / ("%04d-" % i + "x" * 100)).touch()
+        old.unlink()
+        new = self.lock("new")
+        with patch.object(self.index, "full_scan", wraps=self.index.full_scan) as full:
+            self.changed({new})
+            self.assertGreaterEqual(full.call_count, 1)
+        self.assertIsNone(self.index.error)
+        self.assertIs(self.index.watcher, watcher)
+        another = self.lock("another")
+        self.changed({new, another})
+
     def test_full_scan_errors_are_not_false_empty_success(self):
         self.lock("live")
         with patch("session_discovery.os.scandir", side_effect=PermissionError(errno.EACCES, "denied")):
@@ -169,6 +221,38 @@ class DiscoveryTests(unittest.TestCase):
             finally:
                 index.close()
         self.assertLessEqual(count(), before + 1)
+
+
+@unittest.skipUnless(os.name == "nt", "requires Windows ctypes error handling")
+class WindowsChangesTests(unittest.TestCase):
+    def setUp(self):
+        self.watcher = WindowsChanges.__new__(WindowsChanges)
+        self.watcher.api = Mock()
+        self.watcher.handle = 1
+        self.watcher.overlapped = ctypes.c_int()
+        self.watcher.buffer = ctypes.create_string_buffer(64)
+        self.watcher.pending = True
+        arm = patch.object(self.watcher, "arm")
+        self.arm = arm.start()
+        self.addCleanup(arm.stop)
+
+    def test_zero_byte_completion_requests_full_reconciliation_and_rearms(self):
+        self.watcher.api.GetOverlappedResult.return_value = True
+        self.assertIsNone(self.watcher.drain())
+        self.arm.assert_called_once_with()
+
+    def test_notify_enum_dir_requests_full_reconciliation_and_rearms(self):
+        self.watcher.api.GetOverlappedResult.return_value = False
+        with patch("ctypes.get_last_error", return_value=1022):
+            self.assertIsNone(self.watcher.drain())
+        self.arm.assert_called_once_with()
+
+    def test_real_io_errors_do_not_request_reconciliation(self):
+        self.watcher.api.GetOverlappedResult.return_value = False
+        with patch("ctypes.get_last_error", return_value=5):
+            with self.assertRaises(OSError):
+                self.watcher.drain()
+        self.arm.assert_not_called()
 
 
 if __name__ == "__main__":
