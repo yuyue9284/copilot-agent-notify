@@ -993,6 +993,16 @@ def run_worker(directory, session, binary):
         writer.release()
 
 
+def coordinator_ready(directory):
+    status = read_json(directory / "status.json", {})
+    if (status.get("running") and status.get("heartbeat", 0) > time.time() - 5
+            and status.get("token") and owner_alive(status)):
+        if status.get("error"):
+            raise RuntimeError(status["error"] + "; see " + str(directory / "coordinator.log"))
+        return True
+    return False
+
+
 def hook(event, payload):
     session = os.environ.get("ZELLIJ_SESSION_NAME")
     pane = os.environ.get("ZELLIJ_PANE_ID")
@@ -1060,6 +1070,9 @@ def hook(event, payload):
             # a crash between the two writes.
             atomic_json(directory / "closed-sessions.json", closed)
         atomic_json(directory / "registrations.json", records)
+        # The worker marks itself stopped before releasing this registry lock.
+        if coordinator_ready(directory):
+            return 0
     command = [sys.executable, str(Path(__file__).resolve()), "worker",
                "--directory", str(directory.resolve()), "--session", session, "--zellij", binary]
     kwargs = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
@@ -1070,11 +1083,7 @@ def hook(event, payload):
     child = subprocess.Popen(command, **kwargs)
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
-        status = read_json(directory / "status.json", {})
-        if (status.get("running") and status.get("heartbeat", 0) > time.time() - 5
-                and status.get("token") and owner_alive(status)):
-            if status.get("error"):
-                raise RuntimeError(status["error"] + "; see " + str(directory / "coordinator.log"))
+        if coordinator_ready(directory):
             return 0
         if event == "sessionEnd" and child.poll() == 0:
             return 0

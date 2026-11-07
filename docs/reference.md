@@ -50,7 +50,9 @@ copilot plugin install yuyue9284/copilot-agent-notify
 Restart Copilot CLI after installation. Use `copilot plugin list` or
 `/plugin list` to confirm that `personal-agent-notify` is enabled.
 
-The plugin requires a Copilot CLI version supporting Agent Plugins v1. Its
+The plugin requires a Copilot CLI version supporting Agent Plugins v1 and
+direct `exec`/`args` hooks. Direct execution has been checked on CLI
+1.0.108-0 (Windows) and 1.0.106-11 (Linux). Its
 runtime components live under `com.github.copilot/`, separately from repository
 development configuration. `.github/lsp.json` enables C# LSP when developing in
 this repository, but is not loaded as an installed-plugin contribution. The
@@ -65,6 +67,12 @@ copy to verify that the plugin contributes no language servers.
 
 After upgrading an older installed copy, restart existing Copilot sessions to
 reload both the plugin manifest and its hooks.
+
+Hooks launch `windows-helper/bin/copilot-notify` directly. Windows resolves the
+sibling `.exe`, avoiding a PowerShell process for each event; Unix uses the
+executable shell launcher and the existing Bash handlers, without a new runtime
+dependency. Notification delivery stays synchronous and separate from activity
+registration. The PowerShell wrappers remain available for manual diagnostics.
 
 ## Desktop session gadget (Windows + WSL)
 
@@ -616,6 +624,10 @@ One detached Python coordinator per OS-local Zellij session owns all title
 writes. Unix uses `flock`; Windows uses a named OS mutex. Registrations are
 atomic and serialized separately from the writer lock. Each record tracks
 the caller's pane ID, not focus, and the CLI PID plus process start identity.
+After saving registration/close updates under the registry lock, hooks reuse a
+coordinator with a fresh heartbeat and matching live process identity instead
+of launching a redundant worker. A stopped, stale, or dead coordinator takes
+the normal startup/recovery path; live coordinator errors remain visible.
 The CLI owner is found among hook ancestors using `inuse.<pid>.lock`; before
 that file exists, the nearest `copilot`/`node` ancestor is used.
 

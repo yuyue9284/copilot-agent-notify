@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+if [ "$#" -ne 3 ] || [ "$1" != "--hook" ]; then
+    printf '%s\n' 'copilot-notify: expected --hook activity|notify EVENT.' >&2
+    exit 1
+fi
+case "$2" in
+    activity) exec bash "$root/scripts/activity.sh" "$3" ;;
+    notify) exec bash "$root/scripts/notify.sh" "$3" ;;
+    *) printf '%s\n' 'copilot-notify: unsupported hook kind.' >&2; exit 1 ;;
+esac

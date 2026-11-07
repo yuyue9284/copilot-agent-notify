@@ -16,6 +16,13 @@ internal static class CopilotNotify
 
     private static int Main(string[] args)
     {
+        if (args.Length > 0 && args[0] == "--hook")
+            return HookClient.Run(args, Run);
+        return Run(args);
+    }
+
+    private static int Run(string[] args)
+    {
         if (args.Length > 0 && args[0] == "--install-shortcut")
         {
             if (args.Length != 8)

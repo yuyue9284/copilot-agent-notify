@@ -4,46 +4,46 @@
     "sessionStart": [
       {
         "type": "command",
-        "bash": "bash \"${PLUGIN_ROOT}/scripts/activity.sh\" sessionStart",
-        "powershell": "& (Join-Path $env:PLUGIN_ROOT \"scripts/activity.ps1\") sessionStart",
+        "exec": "${PLUGIN_ROOT}/windows-helper/bin/copilot-notify",
+        "args": ["--hook", "activity", "sessionStart"],
         "timeoutSec": 30
       }
     ],
     "userPromptSubmitted": [
       {
         "type": "command",
-        "bash": "bash \"${PLUGIN_ROOT}/scripts/activity.sh\" userPromptSubmitted",
-        "powershell": "& (Join-Path $env:PLUGIN_ROOT \"scripts/activity.ps1\") userPromptSubmitted",
+        "exec": "${PLUGIN_ROOT}/windows-helper/bin/copilot-notify",
+        "args": ["--hook", "activity", "userPromptSubmitted"],
         "timeoutSec": 30
       }
     ],
     "sessionEnd": [
       {
         "type": "command",
-        "bash": "bash \"${PLUGIN_ROOT}/scripts/activity.sh\" sessionEnd",
-        "powershell": "& (Join-Path $env:PLUGIN_ROOT \"scripts/activity.ps1\") sessionEnd",
+        "exec": "${PLUGIN_ROOT}/windows-helper/bin/copilot-notify",
+        "args": ["--hook", "activity", "sessionEnd"],
         "timeoutSec": 30
       }
     ],
     "agentStop": [
       {
         "type": "command",
-        "bash": "\"${PLUGIN_ROOT}/scripts/notify.sh\" agentStop",
-        "powershell": "& (Join-Path $env:PLUGIN_ROOT \"scripts/notify.ps1\") agentStop",
+        "exec": "${PLUGIN_ROOT}/windows-helper/bin/copilot-notify",
+        "args": ["--hook", "notify", "agentStop"],
         "timeoutSec": 15
       },
       {
         "type": "command",
-        "bash": "bash \"${PLUGIN_ROOT}/scripts/activity.sh\" agentStop",
-        "powershell": "& (Join-Path $env:PLUGIN_ROOT \"scripts/activity.ps1\") agentStop",
+        "exec": "${PLUGIN_ROOT}/windows-helper/bin/copilot-notify",
+        "args": ["--hook", "activity", "agentStop"],
         "timeoutSec": 30
       }
     ],
     "subagentStop": [
       {
         "type": "command",
-        "bash": "\"${PLUGIN_ROOT}/scripts/notify.sh\" subagentStop",
-        "powershell": "& (Join-Path $env:PLUGIN_ROOT \"scripts/notify.ps1\") subagentStop",
+        "exec": "${PLUGIN_ROOT}/windows-helper/bin/copilot-notify",
+        "args": ["--hook", "notify", "subagentStop"],
         "timeoutSec": 15
       }
     ],
@@ -51,8 +51,8 @@
       {
         "type": "command",
         "matcher": "permission_prompt|elicitation_dialog",
-        "bash": "\"${PLUGIN_ROOT}/scripts/notify.sh\" notification",
-        "powershell": "& (Join-Path $env:PLUGIN_ROOT \"scripts/notify.ps1\") notification",
+        "exec": "${PLUGIN_ROOT}/windows-helper/bin/copilot-notify",
+        "args": ["--hook", "notify", "notification"],
         "timeoutSec": 15
       }
     ]

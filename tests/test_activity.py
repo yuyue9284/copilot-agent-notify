@@ -805,6 +805,68 @@ class SiblingDiscoveryTests(Files):
                 activity.closed_sessions(self.directory)
 
 
+class HookReuseTests(Files):
+    def setUp(self):
+        super().setUp()
+        self.owner = {"pid": os.getpid(), "token": activity.process_token(os.getpid())}
+        self.env = patch.dict(os.environ, {
+            "ZELLIJ_SESSION_NAME": "synthetic-session", "ZELLIJ_PANE_ID": "1",
+            "COPILOT_NOTIFY_ICONS": "1", "COPILOT_NOTIFY_ZELLIJ": "synthetic-zellij",
+            "COPILOT_NOTIFY_STATE_DIR": str(self.directory / "cache"),
+            "COPILOT_HOME": str(self.directory / "home"),
+        })
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        self.cache = activity.state_directory("synthetic-session")
+        self.cache.mkdir(parents=True)
+        self.status = dict(self.owner, running=True, heartbeat=time.time(), error=None)
+        activity.atomic_json(self.cache / "status.json", self.status)
+        self.key = hashlib.sha256(b"synthetic-root").hexdigest()
+
+    def invoke(self, event="userPromptSubmitted"):
+        with patch.object(activity, "find_owner", return_value=self.owner), \
+                patch.object(activity.shutil, "which", return_value="synthetic-zellij"):
+            return activity.hook(event, {"sessionId": "synthetic-root"})
+
+    def test_live_worker_reused_after_registration_updates_and_close(self):
+        with patch.object(activity.subprocess, "Popen") as spawn:
+            self.assertEqual(self.invoke(), 0)
+            first = activity.read_json(self.cache / "registrations.json")[self.key]
+            with patch.dict(os.environ, ZELLIJ_PANE_ID="2"):
+                self.assertEqual(self.invoke("agentStop"), 0)
+            updated = activity.read_json(self.cache / "registrations.json")[self.key]
+            self.assertEqual(updated["pane_id"], "2")
+            self.assertEqual(updated["created"], first["created"])
+            self.assertEqual(updated["start_offset"], first["start_offset"])
+            self.assertEqual(self.invoke("sessionEnd"), 0)
+            self.assertEqual(activity.read_json(self.cache / "registrations.json"), {})
+            self.assertIn(self.key, activity.closed_sessions(self.cache))
+            self.assertEqual(self.invoke("sessionStart"), 0)
+            self.assertEqual(activity.closed_sessions(self.cache), {})
+            self.assertIn(self.key, activity.read_json(self.cache / "registrations.json"))
+            spawn.assert_not_called()
+
+    def test_stopped_stale_and_reused_process_status_start_replacement(self):
+        for changes in ({"running": False}, {"heartbeat": time.time() - 60},
+                        {"token": "old-process-token"}):
+            with self.subTest(changes=changes):
+                activity.atomic_json(self.cache / "status.json", dict(self.status, **changes))
+                def start_worker(*args, **kwargs):
+                    activity.atomic_json(self.cache / "status.json", self.status)
+                with patch.object(activity.subprocess, "Popen", side_effect=start_worker) as spawn:
+                    self.assertEqual(self.invoke(), 0)
+                    spawn.assert_called_once()
+                    self.assertIn(self.key, activity.read_json(self.cache / "registrations.json"))
+
+    def test_live_worker_error_is_not_hidden_by_reuse(self):
+        activity.atomic_json(self.cache / "status.json", dict(self.status, error="synthetic failure"))
+        with patch.object(activity.subprocess, "Popen") as spawn:
+            with self.assertRaisesRegex(RuntimeError, "synthetic failure"):
+                self.invoke()
+            spawn.assert_not_called()
+        self.assertIn(self.key, activity.read_json(self.cache / "registrations.json"))
+
+
 class RuntimeTests(Files):
     def setUp(self):
         super().setUp()

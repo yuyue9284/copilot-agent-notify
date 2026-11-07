@@ -21,7 +21,9 @@ New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null
     "/reference:$windowsMetadata" `
     "/reference:$windowsRuntime" `
     "/reference:$systemRuntime" `
-    $source
+    /reference:System.Web.Extensions.dll `
+    $source `
+    (Join-Path $PSScriptRoot "HookClient.cs")
 
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE

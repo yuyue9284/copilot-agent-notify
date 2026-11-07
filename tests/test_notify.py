@@ -6,17 +6,36 @@ from pathlib import Path
 import shutil
 import shlex
 import subprocess
+import tempfile
 import unittest
-import uuid
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class NotificationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.native = None
+        if os.name == "nt":
+            temporary = tempfile.TemporaryDirectory(prefix="native-hook-tests-")
+            cls.addClassCleanup(temporary.cleanup)
+            cls.native = Path(temporary.name) / "capture.exe"
+            compiler = Path(os.environ["WINDIR"]) / "Microsoft.NET/Framework64/v4.0.30319/csc.exe"
+            result = subprocess.run([
+                str(compiler), "/nologo", "/out:" + str(cls.native),
+                "/reference:System.Web.Extensions.dll",
+                str(ROOT / "windows-helper/HookClient.cs"),
+                str(ROOT / "tests/HookClientCapture.cs"),
+            ], capture_output=True, text=True, timeout=30)
+            if result.returncode:
+                raise AssertionError(result.stdout + result.stderr)
+
     def setUp(self):
-        self.directory = ROOT / "tests" / (".runtime-" + uuid.uuid4().hex)
-        self.directory.mkdir()
+        temporary = tempfile.TemporaryDirectory(
+            prefix=".runtime-", dir=None if os.name == "nt" else ROOT / "tests")
+        self.addCleanup(temporary.cleanup)
+        self.directory = Path(temporary.name)
         self.capture = self.directory / "notifications.jsonl"
         self.transcript = self.directory / "events.jsonl"
         self.transcript.write_text(json.dumps({
@@ -29,6 +48,8 @@ class NotificationTests(unittest.TestCase):
         bash = shutil.which("bash")
         if bash and os.name != "nt":
             self.runners["bash"] = [bash, str(ROOT / "scripts/notify.sh")]
+            self.runners["direct"] = [
+                str(ROOT / "windows-helper/bin/copilot-notify"), "--hook", "notify"]
             binary = self.directory / "bin"
             binary.mkdir()
             for name, source in {
@@ -51,10 +72,12 @@ class NotificationTests(unittest.TestCase):
                 '@($args) | ConvertTo-Json -Compress | Add-Content -LiteralPath $env:CAPTURE_FILE\n'
                 '$global:LASTEXITCODE = 0\n')
             self.runners["powershell"] = [powershell, "-NoProfile", "-File", str(script)]
+        if self.native:
+            binary = self.directory / "windows-helper/bin/copilot-notify.exe"
+            binary.parent.mkdir(parents=True)
+            shutil.copyfile(self.native, binary)
+            self.runners["native"] = [str(binary), "--hook", "notify"]
         self.assertTrue(self.runners, "no supported notification wrapper runtime found")
-
-    def tearDown(self):
-        shutil.rmtree(self.directory)
 
     def run_hook(self, runner, hook, payload, opt_in="0", hook_alerts=None):
         self.capture.unlink(missing_ok=True)
@@ -66,7 +89,67 @@ class NotificationTests(unittest.TestCase):
                                 env=environment)
         if os.name == "nt" and "AuthorizationManager check failed" in result.stderr:
             self.skipTest("Native PowerShell refuses scripts on this filesystem; no policy changed")
-        return result, self.capture.read_text() if self.capture.exists() else ""
+        return result, self.capture.read_text(encoding="utf-8-sig") if self.capture.exists() else ""
+
+    def test_native_activity_forwards_unicode_and_exit_status_without_a_shell(self):
+        if "native" not in self.runners:
+            self.skipTest("Native Windows hook client")
+        scripts = self.directory / "scripts"
+        scripts.mkdir()
+        (scripts / "activity.py").write_text(
+            "import json, os, sys\n"
+            "from pathlib import Path\n"
+            "Path(os.environ['CAPTURE_FILE']).write_text("
+            "json.dumps([sys.argv[1:], json.load(sys.stdin)]), encoding='utf-8')\n"
+            "sys.exit(7)\n", encoding="utf-8")
+        payload = {"sessionId": "synthetic-root", "cwd": "C:\\synthetic path\\\u6d4b\u8bd5"}
+        environment = dict(self.env, ZELLIJ_SESSION_NAME="synthetic", ZELLIJ_PANE_ID="1",
+                           COPILOT_NOTIFY_ICONS="1")
+        command = [self.runners["native"][0], "--hook", "activity", "userPromptSubmitted"]
+        result = subprocess.run(command, input=json.dumps(payload, ensure_ascii=False),
+                                encoding="utf-8", capture_output=True, env=environment, timeout=15)
+        self.assertEqual(result.returncode, 7, result.stderr)
+        self.assertEqual(json.loads(self.capture.read_text(encoding="utf-8")),
+                         [["hook", "userPromptSubmitted"], payload])
+
+    def test_activity_disabled_does_not_require_python_or_valid_input(self):
+        for runner in ("direct", "native"):
+            if runner not in self.runners:
+                continue
+            with self.subTest(runner=runner):
+                command = [self.runners[runner][0], "--hook", "activity", "agentStop"]
+                result = subprocess.run(command, input="not json", text=True, capture_output=True,
+                                        env=self.env, timeout=15)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertFalse(self.capture.exists())
+
+    def test_native_notification_matches_powershell_title_message_tag_and_failure(self):
+        if "native" not in self.runners or "powershell" not in self.runners:
+            self.skipTest("Native Windows hook client and PowerShell control")
+        workspace = Path(self.env["COPILOT_HOME"]) / "session-state/root-session/workspace.yaml"
+        workspace.parent.mkdir(parents=True)
+        payloads = {
+            "agentStop": {"sessionId": "root-session", "transcriptPath": str(self.transcript)},
+            "subagentStop": {"sessionId": "root-session", "agentId": "child-session",
+                             "agentDisplayName": "Synthetic agent"},
+            "notification": {"sessionId": "root-session", "notification_type": "permission_prompt",
+                             "title": "Synthetic permission"},
+        }
+        for name in ('"Unicode \\u6d4b\\u8bd5\\nTitle"', "'It''s a test'", "x" * 80):
+            workspace.write_text("name: " + name + "\n", encoding="utf-8")
+            for hook, payload in payloads.items():
+                with self.subTest(name=name, hook=hook):
+                    payload = dict(payload, cwd="C:\\synthetic workspace")
+                    expected, old = self.run_hook("powershell", hook, payload, opt_in="1")
+                    actual, new = self.run_hook("native", hook, payload, opt_in="1")
+                    self.assertEqual(expected.returncode, 0, expected.stderr)
+                    self.assertEqual(actual.returncode, 0, actual.stderr)
+                    self.assertEqual(json.loads(new), json.loads(old))
+        self.env["NOTIFIER_EXIT"] = "9"
+        result, captured = self.run_hook("native", "agentStop", payloads["agentStop"])
+        self.assertEqual(result.returncode, 9, result.stderr)
+        self.assertTrue(captured)
 
     def test_hook_alerts_can_be_disabled_independently(self):
         payloads = {
